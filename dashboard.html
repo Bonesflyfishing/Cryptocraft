@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CryptoCraft — Chain Explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --amber: #ffb000;
+    --amber-dim: #b37800;
+    --amber-faint: #3d2800;
+    --amber-glow: rgba(255,176,0,0.15);
+    --amber-glow-strong: rgba(255,176,0,0.35);
+    --green: #00ff88;
+    --red: #ff4444;
+    --bg: #0a0700;
+    --bg2: #0f0b00;
+    --bg3: #161000;
+    --border: rgba(255,176,0,0.25);
+    --border-bright: rgba(255,176,0,0.6);
+    --font-mono: 'Share Tech Mono', monospace;
+    --font-display: 'Orbitron', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--amber);
+    font-family: var(--font-mono);
+    min-height: 100vh;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  /* CRT scanline overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* CRT vignette */
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 9998;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--amber-dim); }
+
+  /* ── Header ── */
+  header {
+    border-bottom: 1px solid var(--border-bright);
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg2);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 0 40px rgba(255,176,0,0.1);
+  }
+
+  .logo {
+    font-family: var(--font-display);
+    font-size: 1.4rem;
+    font-weight: 900;
+    letter-spacing: 0.15em;
+    text-shadow: 0 0 20px var(--amber), 0 0 40px rgba(255,176,0,0.4);
+    animation: flicker 8s infinite;
+  }
+
+  .logo span { color: var(--amber-dim); font-weight: 400; }
+
+  @keyframes flicker {
+    0%,96%,98%,100% { opacity: 1; }
+    97%,99% { opacity: 0.85; }
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    font-size: 0.75rem;
+    color: var(--amber-dim);
+  }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+    display: inline-block;
+    margin-right: 6px;
+  }
+
+  .status-dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
+
+  @keyframes pulse {
+    0%,100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Drop Zone ── */
+  #drop-zone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100vh - 73px);
+    gap: 24px;
+    padding: 40px;
+    animation: fadeIn 0.5s ease;
+  }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  .drop-box {
+    border: 2px dashed var(--border-bright);
+    padding: 60px 80px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background: var(--bg2);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .drop-box::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: var(--amber-glow);
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .drop-box:hover::before, .drop-box.dragover::before { opacity: 1; }
+  .drop-box:hover, .drop-box.dragover {
+    border-color: var(--amber);
+    box-shadow: 0 0 30px var(--amber-glow-strong), inset 0 0 30px var(--amber-glow);
+  }
+
+  .drop-icon {
+    font-size: 3rem;
+    margin-bottom: 16px;
+    display: block;
+    text-shadow: 0 0 20px var(--amber);
+  }
+
+  .drop-title {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+  }
+
+  .drop-sub { color: var(--amber-dim); font-size: 0.8rem; line-height: 1.6; }
+
+  .btn {
+    background: transparent;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    padding: 10px 28px;
+    cursor: pointer;
+    letter-spacing: 0.1em;
+    transition: all 0.15s;
+    text-transform: uppercase;
+  }
+
+  .btn:hover {
+    background: var(--amber-glow-strong);
+    box-shadow: 0 0 20px var(--amber-glow-strong);
+    text-shadow: 0 0 10px var(--amber);
+  }
+
+  .example-hint {
+    color: var(--amber-dim);
+    font-size: 0.75rem;
+    text-align: center;
+    line-height: 1.8;
+  }
+
+  /* ── Dashboard ── */
+  #dashboard {
+    display: none;
+    padding: 28px 32px;
+    animation: fadeIn 0.4s ease;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .chain-info {
+    font-size: 0.75rem;
+    color: var(--amber-dim);
+  }
+
+  .chain-info strong { color: var(--amber); }
+
+  /* ── Stat Cards ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--amber);
+    box-shadow: 0 0 10px var(--amber);
+  }
+
+  .card:hover { border-color: var(--amber); }
+
+  .card-label {
+    font-size: 0.65rem;
+    color: var(--amber-dim);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  .card-value {
+    font-family: var(--font-display);
+    font-size: 1.6rem;
+    font-weight: 700;
+    line-height: 1;
+    text-shadow: 0 0 15px rgba(255,176,0,0.5);
+  }
+
+  .card-value.green { color: var(--green); text-shadow: 0 0 15px rgba(0,255,136,0.4); }
+  .card-value.small { font-size: 1rem; }
+  .card-sub { font-size: 0.7rem; color: var(--amber-dim); margin-top: 6px; }
+
+  /* ── Charts row ── */
+  .charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+
+  @media (max-width: 768px) { .charts-row { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    padding: 20px;
+  }
+
+  .panel-title {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    letter-spacing: 0.2em;
+    color: var(--amber-dim);
+    margin-bottom: 16px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .chart-wrap { position: relative; height: 180px; }
+
+  /* ── Power Calculator ── */
+  .calc-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  @media (max-width: 600px) { .calc-grid { grid-template-columns: 1fr; } }
+
+  .calc-field label {
+    display: block;
+    font-size: 0.65rem;
+    color: var(--amber-dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .calc-field input {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--amber);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+    padding: 8px 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .calc-field input:focus { border-color: var(--amber); box-shadow: 0 0 10px var(--amber-glow); }
+
+  .calc-results {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+  }
+
+  .calc-result {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    padding: 12px 16px;
+  }
+
+  .calc-result-label { font-size: 0.65rem; color: var(--amber-dim); margin-bottom: 4px; letter-spacing: 0.1em; }
+  .calc-result-val { font-family: var(--font-display); font-size: 0.95rem; }
+  .calc-result-val.green { color: var(--green); }
+
+  /* ── Block Explorer ── */
+  .block-list { display: flex; flex-direction: column; gap: 4px; max-height: 480px; overflow-y: auto; }
+
+  .block-row {
+    display: grid;
+    grid-template-columns: 60px 1fr 90px 80px 90px;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--bg3);
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 0.78rem;
+  }
+
+  .block-row:hover {
+    border-color: var(--amber);
+    background: var(--amber-faint);
+    box-shadow: inset 0 0 20px var(--amber-glow);
+  }
+
+  .block-row.genesis { color: var(--amber-dim); }
+  .block-row.header {
+    color: var(--amber-dim);
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: default;
+    background: var(--bg2);
+    border-color: var(--border);
+  }
+
+  .block-row.header:hover { border-color: var(--border); background: var(--bg2); box-shadow: none; }
+
+  .block-index { font-family: var(--font-display); font-size: 0.8rem; }
+  .block-hash { font-size: 0.72rem; color: var(--amber-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .block-hash .zeros { color: var(--amber); }
+  .block-zeros { text-align: center; }
+  .block-reward { color: var(--green); text-align: right; }
+  .block-time { color: var(--amber-dim); font-size: 0.7rem; text-align: right; }
+
+  /* ── Block Detail Modal ── */
+  #modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.8);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  #modal-overlay.open { display: flex; }
+
+  .modal {
+    background: var(--bg2);
+    border: 1px solid var(--amber);
+    box-shadow: 0 0 60px rgba(255,176,0,0.3);
+    padding: 28px;
+    max-width: 600px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+    animation: fadeIn 0.2s ease;
+  }
+
+  .modal-title {
+    font-family: var(--font-display);
+    font-size: 0.9rem;
+    letter-spacing: 0.15em;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .modal-close {
+    background: none;
+    border: none;
+    color: var(--amber-dim);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    transition: color 0.15s;
+  }
+
+  .modal-close:hover { color: var(--amber); }
+
+  .modal-field { margin-bottom: 14px; }
+  .modal-field-label { font-size: 0.65rem; color: var(--amber-dim); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 4px; }
+  .modal-field-val { font-size: 0.82rem; word-break: break-all; line-height: 1.5; }
+  .modal-field-val .zeros { color: var(--green); text-shadow: 0 0 8px rgba(0,255,136,0.4); }
+
+  /* ── Chain Visualizer ── */
+  .chain-vis {
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+    padding: 8px 0 16px;
+    align-items: center;
+  }
+
+  .chain-vis::-webkit-scrollbar { height: 4px; }
+
+  .chain-block {
+    flex-shrink: 0;
+    width: 52px;
+    height: 52px;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-size: 0.6rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+
+  .chain-block:hover {
+    border-color: var(--amber);
+    background: var(--amber-faint);
+    box-shadow: 0 0 15px var(--amber-glow-strong);
+    z-index: 1;
+  }
+
+  .chain-link {
+    flex-shrink: 0;
+    width: 16px;
+    height: 2px;
+    background: var(--amber-dim);
+  }
+
+  .chain-block.genesis { border-color: var(--amber-dim); color: var(--amber-dim); }
+  .chain-block.d1 { border-color: #3a3a00; }
+  .chain-block.d2 { border-color: #4a4000; }
+  .chain-block.d3 { border-color: #5a5000; }
+  .chain-block.d4 { border-color: #7a6500; }
+  .chain-block.d5 { border-color: #9a8000; }
+  .chain-block.d6 { border-color: #ba9b00; }
+  .chain-block.d7 { border-color: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
+  .chain-block.d8 { border-color: var(--amber); box-shadow: 0 0 12px var(--amber-glow-strong); background: var(--amber-faint); }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--bg2);
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 12px 20px;
+    z-index: 2000;
+    box-shadow: 0 0 20px var(--amber-glow-strong);
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.2s;
+    pointer-events: none;
+  }
+
+  #toast.show { opacity: 1; transform: none; }
+
+  /* ── Misc ── */
+  .section-gap { margin-bottom: 28px; }
+  .text-dim { color: var(--amber-dim); }
+  .text-green { color: var(--green); }
+  .mono { font-family: var(--font-mono); }
+
+  input[type="file"] { display: none; }
+
+  .blink { animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">CRYPTO<span>CRAFT</span> ⛏</div>
+  <div class="header-right">
+    <span id="status-indicator"><span class="status-dot offline" id="status-dot"></span><span id="status-text">NO CHAIN LOADED</span></span>
+    <span id="header-miner" class="text-dim"></span>
+    <button class="btn" onclick="pickFile()">LOAD CHAIN</button>
+    <input type="file" id="file-input" accept=".json" onchange="handleFileSelect(event)">
+  </div>
+</header>
+
+<!-- Drop Zone -->
+<div id="drop-zone">
+  <div class="drop-box" id="drop-box" onclick="document.getElementById('file-input').click()">
+    <span class="drop-icon">⛏</span>
+    <div class="drop-title">LOAD YOUR CHAIN FILE</div>
+    <div class="drop-sub">
+      Drop <strong>cryptocraft_chain_*.json</strong> here<br>
+      or click to browse
+    </div>
+  </div>
+  <div class="example-hint">
+    Your chain file is in the same folder as the miner executable.<br>
+    Filename looks like: <strong>cryptocraft_chain_you_example_com.json</strong>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard">
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="chain-info">
+      CHAIN: <strong id="info-miner">—</strong> &nbsp;|&nbsp;
+      FILE: <strong id="info-file">—</strong> &nbsp;|&nbsp;
+      LOADED: <strong id="info-loaded">—</strong>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <span id="refresh-indicator" style="font-size:0.7rem;color:var(--amber-dim)"></span>
+      <button class="btn" onclick="pickFile()">CHANGE FILE</button>
+    </div>
+  </div>
+
+  <!-- Stat Cards -->
+  <div class="cards" id="cards"></div>
+
+  <!-- Chain Visualizer -->
+  <div class="panel section-gap">
+    <div class="panel-title">Chain Visualization</div>
+    <div class="chain-vis" id="chain-vis"></div>
+    <div style="font-size:0.65rem;color:var(--amber-dim);margin-top:4px">
+      Darker = lower difficulty &nbsp;|&nbsp; Brighter = higher difficulty &nbsp;|&nbsp; Click any block for details
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-row section-gap">
+    <div class="panel">
+      <div class="panel-title">Reward Per Block</div>
+      <div class="chart-wrap"><canvas id="chart-rewards"></canvas></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Difficulty Over Time</div>
+      <div class="chart-wrap"><canvas id="chart-difficulty"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Power Calculator -->
+  <div class="panel section-gap">
+    <div class="panel-title">Electricity Cost Calculator</div>
+    <div class="calc-grid">
+      <div class="calc-field">
+        <label>CPU Power Draw (Watts)</label>
+        <input type="number" id="calc-watts" value="80" oninput="updateCalc()">
+      </div>
+      <div class="calc-field">
+        <label>Electricity Rate ($/kWh)</label>
+        <input type="number" id="calc-rate" value="0.15" step="0.01" oninput="updateCalc()">
+      </div>
+      <div class="calc-field">
+        <label>Hashrate (H/s)</label>
+        <input type="number" id="calc-hashrate" value="5700000" oninput="updateCalc()">
+      </div>
+    </div>
+    <div class="calc-results" id="calc-results"></div>
+  </div>
+
+  <!-- Block Explorer -->
+  <div class="panel section-gap">
+    <div class="panel-title">Block Explorer</div>
+    <div class="block-list" id="block-list"></div>
+  </div>
+
+</div>
+
+<!-- Block Detail Modal -->
+<div id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" id="modal">
+    <div class="modal-title">
+      <span id="modal-title-text">BLOCK DETAILS</span>
+      <button class="modal-close" onclick="document.getElementById('modal-overlay').classList.remove('open')">[ CLOSE ]</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+
+let chain           = null;
+let fileName        = '';
+let chartRewards    = null;
+let chartDifficulty = null;
+let fileHandle      = null;   // FileSystemFileHandle — enables live re-reads
+let pollTimer       = null;
+let lastBlockCount  = 0;
+const POLL_MS       = 5000;   // re-read every 5 seconds
+
+// ── File Loading ─────────────────────────────────────────────────────────────
+
+const dropBox = document.getElementById('drop-box');
+
+dropBox.addEventListener('dragover', e => { e.preventDefault(); dropBox.classList.add('dragover'); });
+dropBox.addEventListener('dragleave', () => dropBox.classList.remove('dragover'));
+dropBox.addEventListener('drop', async e => {
+  e.preventDefault();
+  dropBox.classList.remove('dragover');
+  // Try to get a FileSystemFileHandle from the drag (Chrome/Edge only)
+  if (e.dataTransfer.items && e.dataTransfer.items[0].getAsFileSystemHandle) {
+    const handle = await e.dataTransfer.items[0].getAsFileSystemHandle();
+    if (handle && handle.kind === 'file') {
+      fileHandle = handle;
+      fileName   = handle.name;
+      await readFromHandle();
+      startPolling();
+      return;
+    }
+  }
+  // Fallback — no live updates but still works
+  const file = e.dataTransfer.files[0];
+  if (file) loadFileObject(file);
+});
+
+// Main button — uses File System Access API picker for live updates
+async function pickFile() {
+  if (window.showOpenFilePicker) {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'Chain JSON', accept: { 'application/json': ['.json'] } }],
+        multiple: false
+      });
+      fileHandle = handle;
+      fileName   = handle.name;
+      await readFromHandle();
+      startPolling();
+    } catch (err) {
+      if (err.name !== 'AbortError') showToast('ERROR: ' + err.message);
+    }
+  } else {
+    // Firefox fallback
+    document.getElementById('file-input').click();
+  }
+}
+
+// Fallback for Firefox / file input
+function handleFileSelect(e) {
+  const file = e.target.files[0];
+  if (file) loadFileObject(file);
+}
+
+// Read from a FileSystemFileHandle (enables polling)
+async function readFromHandle() {
+  try {
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    parseAndRender(text, true);
+  } catch (err) {
+    showToast('Read error: ' + err.message);
+  }
+}
+
+// Read from a plain File object (drag fallback / Firefox)
+function loadFileObject(file) {
+  fileName = file.name;
+  fileHandle = null;
+  stopPolling();
+  const reader = new FileReader();
+  reader.onload = e => parseAndRender(e.target.result, false);
+  reader.readAsText(file);
+}
+
+function parseAndRender(text, live) {
+  try {
+    const data = JSON.parse(text);
+    if (!data.chain || !Array.isArray(data.chain)) throw new Error('Invalid chain file');
+    const isNew    = !chain;
+    const newBlock = chain && data.chain.length > lastBlockCount;
+    chain          = data;
+    lastBlockCount = data.chain.length;
+    renderDashboard(live);
+    if (isNew)      showToast('Chain loaded — ' + data.chain.length + ' blocks');
+    if (newBlock)   showToast('New block found! Chain is now ' + data.chain.length + ' blocks');
+  } catch (err) {
+    showToast('ERROR: ' + err.message);
+  }
+}
+
+// ── Live Polling ──────────────────────────────────────────────────────────────
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(async () => {
+    if (fileHandle) await readFromHandle();
+  }, POLL_MS);
+  updateRefreshIndicator(true);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  updateRefreshIndicator(false);
+}
+
+function updateRefreshIndicator(live) {
+  const el = document.getElementById('refresh-indicator');
+  if (el) el.textContent = live ? '⟳ LIVE — refreshing every 5s' : '⚠ STATIC — no live updates (Firefox?)';
+  if (el) el.style.color = live ? 'var(--green)' : 'var(--amber-dim)';
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+function renderDashboard(live) {
+  document.getElementById('drop-zone').style.display    = 'none';
+  document.getElementById('dashboard').style.display    = 'block';
+
+  const dot  = document.getElementById('status-dot');
+  const txt  = document.getElementById('status-text');
+  dot.classList.remove('offline');
+  txt.textContent = live ? 'LIVE' : 'LOADED';
+
+  document.getElementById('info-miner').textContent   = chain.miner_name || '—';
+  document.getElementById('info-file').textContent    = fileName;
+  document.getElementById('info-loaded').textContent  = new Date().toLocaleTimeString();
+  document.getElementById('header-miner').textContent = chain.miner_name || '';
+
+  renderCards();
+  renderChainVis();
+  renderCharts();
+  renderBlockList();
+  updateCalc();
+}
+
+function showDropZone() {
+  stopPolling();
+  fileHandle = null;
+  chain      = null;
+  document.getElementById('drop-zone').style.display    = 'flex';
+  document.getElementById('dashboard').style.display    = 'none';
+  document.getElementById('status-dot').classList.add('offline');
+  document.getElementById('status-text').textContent    = 'NO CHAIN LOADED';
+  document.getElementById('header-miner').textContent   = '';
+}
+
+// ── Cards ────────────────────────────────────────────────────────────────────
+
+function renderCards() {
+  const blocks  = chain.chain.filter(b => b.index > 0);
+  const total   = chain.total_mined || 0;
+  const diff    = chain.difficulty || 1;
+  const reward  = chain.chain.length > 0 ? currentReward() : 0;
+  const avgTime = avgBlockTime();
+  const halving = 100 - (chain.chain.length % 100);
+
+  const cards = [
+    { label: 'Total Blocks Mined', value: blocks.length, sub: chain.chain.length + ' total chain length' },
+    { label: 'CC Earned', value: total.toFixed(4), sub: 'CryptoCraft Coins', cls: 'green' },
+    { label: 'Current Difficulty', value: diff + ' zeros', sub: '#'.repeat(diff) + '.'.repeat(8-diff) },
+    { label: 'Block Reward', value: reward.toFixed(4) + ' CC', sub: 'Halving in ' + halving + ' blocks' },
+    { label: 'Avg Block Time', value: avgTime > 0 ? fmtDuration(avgTime) : '—', sub: 'across last 10 blocks' },
+    { label: 'Chain Length', value: chain.chain.length, sub: 'including genesis block' },
+  ];
+
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="card-label">${c.label}</div>
+      <div class="card-value ${c.cls||''} ${String(c.value).length > 8 ? 'small' : ''}">${c.value}</div>
+      <div class="card-sub">${c.sub}</div>
+    </div>
+  `).join('');
+}
+
+function currentReward() {
+  const halvings = Math.floor(chain.chain.length / 100);
+  return 50 / Math.pow(2, halvings);
+}
+
+function avgBlockTime() {
+  const minedBlocks = chain.chain.filter(b => b.index > 0);
+  if (minedBlocks.length < 2) return 0;
+  const recent = minedBlocks.slice(-Math.min(10, minedBlocks.length));
+  const elapsed = recent[recent.length-1].timestamp - recent[0].timestamp;
+  return Math.round(elapsed / (recent.length - 1));
+}
+
+// ── Chain Visualizer ─────────────────────────────────────────────────────────
+
+function renderChainVis() {
+  const vis = document.getElementById('chain-vis');
+  const blocks = chain.chain.slice(-60); // show last 60
+  vis.innerHTML = blocks.map((b, i) => {
+    const dClass = b.index === 0 ? 'genesis' : `d${Math.min(b.difficulty, 8)}`;
+    const label  = b.index === 0 ? 'GEN' : '#' + b.index;
+    return (i > 0 ? '<div class="chain-link"></div>' : '') +
+      `<div class="chain-block ${dClass}" onclick="showBlock(${b.index})" title="Block #${b.index}">${label}</div>`;
+  }).join('');
+  // Scroll to end
+  vis.scrollLeft = vis.scrollWidth;
+}
+
+// ── Charts ───────────────────────────────────────────────────────────────────
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: {
+      ticks: { color: '#b37800', font: { family: 'Share Tech Mono', size: 10 }, maxTicksLimit: 8 },
+      grid: { color: 'rgba(255,176,0,0.08)' },
+      border: { color: 'rgba(255,176,0,0.2)' }
+    },
+    y: {
+      ticks: { color: '#b37800', font: { family: 'Share Tech Mono', size: 10 } },
+      grid: { color: 'rgba(255,176,0,0.08)' },
+      border: { color: 'rgba(255,176,0,0.2)' }
+    }
+  }
+};
+
+function renderCharts() {
+  const minedBlocks = chain.chain.filter(b => b.index > 0);
+  const labels      = minedBlocks.map(b => '#' + b.index);
+  const rewards     = minedBlocks.map(b => b.reward);
+  const diffs       = minedBlocks.map(b => b.difficulty);
+
+  if (chartRewards)    { chartRewards.destroy(); }
+  if (chartDifficulty) { chartDifficulty.destroy(); }
+
+  chartRewards = new Chart(document.getElementById('chart-rewards'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: rewards,
+        backgroundColor: 'rgba(0,255,136,0.3)',
+        borderColor: '#00ff88',
+        borderWidth: 1,
+      }]
+    },
+    options: { ...chartDefaults }
+  });
+
+  chartDifficulty = new Chart(document.getElementById('chart-difficulty'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: diffs,
+        borderColor: '#ffb000',
+        backgroundColor: 'rgba(255,176,0,0.08)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#ffb000',
+        fill: true,
+        stepped: true,
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      scales: {
+        ...chartDefaults.scales,
+        y: { ...chartDefaults.scales.y, min: 0, max: 9, ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 } }
+      }
+    }
+  });
+}
+
+// ── Block List ───────────────────────────────────────────────────────────────
+
+function renderBlockList() {
+  const list = document.getElementById('block-list');
+  const rows = [...chain.chain].reverse().map(b => {
+    const zeros    = b.hash.match(/^0*/)[0].length;
+    const hashDisp = `<span class="zeros">${b.hash.slice(0, zeros)}</span>${b.hash.slice(zeros, 16)}…${b.hash.slice(-8)}`;
+    const timeStr  = new Date(b.timestamp * 1000).toLocaleString();
+    const isGenesis = b.index === 0;
+    return `
+      <div class="block-row ${isGenesis ? 'genesis' : ''}" onclick="showBlock(${b.index})">
+        <div class="block-index">#${b.index}</div>
+        <div class="block-hash mono">${hashDisp}</div>
+        <div class="block-zeros">${zeros} zeros</div>
+        <div class="block-reward">${isGenesis ? '—' : b.reward.toFixed(4) + ' CC'}</div>
+        <div class="block-time">${timeStr}</div>
+      </div>`;
+  });
+
+  list.innerHTML = `
+    <div class="block-row header">
+      <div>Index</div><div>Hash</div><div>Zeros</div><div>Reward</div><div>Time</div>
+    </div>` + rows.join('');
+}
+
+// ── Block Modal ───────────────────────────────────────────────────────────────
+
+function showBlock(index) {
+  const b = chain.chain.find(b => b.index === index);
+  if (!b) return;
+
+  const zeros    = b.hash.match(/^0*/)[0].length;
+  const hashDisp = `<span class="zeros">${b.hash.slice(0, zeros)}</span>${b.hash.slice(zeros)}`;
+
+  document.getElementById('modal-title-text').textContent = `BLOCK #${b.index}`;
+  document.getElementById('modal-body').innerHTML = `
+    <div class="modal-field"><div class="modal-field-label">Hash</div><div class="modal-field-val mono">${hashDisp}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Previous Hash</div><div class="modal-field-val mono text-dim">${b.previous_hash}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Nonce</div><div class="modal-field-val mono">${b.nonce.toLocaleString()}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Timestamp</div><div class="modal-field-val">${new Date(b.timestamp * 1000).toLocaleString()}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Difficulty</div><div class="modal-field-val">${b.difficulty} leading zeros</div></div>
+    <div class="modal-field"><div class="modal-field-label">Reward</div><div class="modal-field-val text-green">${b.reward} CC</div></div>
+    <div class="modal-field"><div class="modal-field-label">Miner</div><div class="modal-field-val">${b.miner}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Data</div><div class="modal-field-val text-dim">${b.data}</div></div>
+    <div class="modal-field"><div class="modal-field-label">Leading Zeros Found</div><div class="modal-field-val text-green">${zeros} / ${b.difficulty} required</div></div>
+  `;
+  document.getElementById('modal-overlay').classList.add('open');
+}
+
+function closeModal(e) {
+  if (e.target === document.getElementById('modal-overlay')) {
+    document.getElementById('modal-overlay').classList.remove('open');
+  }
+}
+
+// ── Power Calculator ──────────────────────────────────────────────────────────
+
+function updateCalc() {
+  const watts    = parseFloat(document.getElementById('calc-watts').value)    || 80;
+  const rate     = parseFloat(document.getElementById('calc-rate').value)     || 0.15;
+  const hashrate = parseFloat(document.getElementById('calc-hashrate').value) || 5700000;
+
+  const costPerHour  = (watts / 1000) * rate;
+  const diff         = chain ? chain.difficulty : 7;
+  const expectedHash = Math.pow(16, diff);
+  const secsPerBlock = expectedHash / hashrate;
+  const costPerBlock = costPerHour * (secsPerBlock / 3600);
+  const reward       = chain ? currentReward() : 50;
+  const costPerCC    = reward > 0 ? costPerBlock / reward : 0;
+  const ccPerHour    = (hashrate / expectedHash) * 3600 * reward;
+  const profitPerHr  = ccPerHour * costPerCC - costPerHour; // always 0 since CC has no market
+
+  const results = [
+    { label: 'Cost Per Hour',  val: '$' + costPerHour.toFixed(4),  cls: '' },
+    { label: 'Est. Block Time', val: fmtDuration(secsPerBlock),    cls: '' },
+    { label: 'Cost Per Block', val: '$' + costPerBlock.toFixed(5),  cls: '' },
+    { label: 'Cost Per 1 CC',  val: '$' + costPerCC.toFixed(5),    cls: '' },
+    { label: 'CC Per Hour',    val: ccPerHour.toFixed(4) + ' CC',  cls: 'green' },
+    { label: 'CC Per Day',     val: (ccPerHour * 24).toFixed(2) + ' CC', cls: 'green' },
+  ];
+
+  document.getElementById('calc-results').innerHTML = results.map(r => `
+    <div class="calc-result">
+      <div class="calc-result-label">${r.label}</div>
+      <div class="calc-result-val ${r.cls}">${r.val}</div>
+    </div>
+  `).join('');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmtDuration(secs) {
+  secs = Math.round(secs);
+  if (secs < 60)   return secs + 's';
+  if (secs < 3600) return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+  return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>
