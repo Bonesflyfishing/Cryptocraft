@@ -24,6 +24,7 @@ argon2 = "0.5"
 rpassword = "7.3"
 uuid = { version = "1.8", features = ["v4"] }
 tiny_http = "0.12"
+if-addrs = "0.10"
 
 [profile.release]
 opt-level = 3
