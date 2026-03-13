@@ -1,11 +1,14 @@
 // ─── network.rs ───────────────────────────────────────────────────────────────
-// Network interface detection and selection.
-// Lists WiFi and Ethernet interfaces separately so the user can pick which
-// one to host/join on.
+// Network interface detection, selection, and pool auto-discovery.
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::pool_server::{DISCOVERY_PING, DISCOVERY_PONG, DISCOVERY_PORT};
 use crossterm::{execute, style::{Color, ResetColor, SetForegroundColor}};
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    net::UdpSocket,
+    time::Duration,
+};
 
 #[derive(Debug, Clone)]
 pub struct Iface {
@@ -131,7 +134,29 @@ pub fn pick_host_interface() -> (String, String) {
     }
 }
 
-/// Interactive prompt — user enters or picks the server IP to connect to.
+/// Try to find a CryptoCraft pool server on the local network via UDP broadcast.
+/// Sends CRYPTOCRAFT_DISCOVER_V1, waits up to `timeout_secs` for a reply.
+/// Returns the server address string e.g. "192.168.1.2:8080" if found.
+pub fn discover_pool(timeout_secs: u64) -> Option<String> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.set_broadcast(true).ok()?;
+    sock.set_read_timeout(Some(Duration::from_secs(timeout_secs))).ok()?;
+
+    let target = format!("255.255.255.255:{}", DISCOVERY_PORT);
+    sock.send_to(DISCOVERY_PING.as_bytes(), &target).ok()?;
+
+    let mut buf = [0u8; 128];
+    if let Ok((len, _src)) = sock.recv_from(&mut buf) {
+        let reply = std::str::from_utf8(&buf[..len]).unwrap_or("");
+        // Expected format: "CRYPTOCRAFT_POOL_V1|192.168.1.2:8080"
+        if let Some(addr) = reply.strip_prefix(&format!("{}|", DISCOVERY_PONG)) {
+            return Some(addr.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Interactive prompt — auto-discovers pool or lets user enter IP manually.
 pub fn pick_server_address(default_port: u16) -> String {
     let ifaces = list_interfaces();
 
@@ -143,9 +168,10 @@ pub fn pick_server_address(default_port: u16) -> String {
     execute!(io::stdout(), ResetColor).ok();
     println!();
 
+    // Show this machine's interfaces for reference
     if !ifaces.is_empty() {
         execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
-        println!("  This machine's interfaces (for reference):");
+        println!("  This machine's interfaces:");
         for iface in &ifaces {
             println!("    {} {}  ({})", iface.kind, iface.ip, iface.name);
         }
@@ -153,8 +179,37 @@ pub fn pick_server_address(default_port: u16) -> String {
         execute!(io::stdout(), ResetColor).ok();
     }
 
+    // Try auto-discovery first
     execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
-    print!("  Server IP (default 192.168.1.2): ");
+    println!("  Searching for pool server on local network...");
+    execute!(io::stdout(), ResetColor).ok();
+    io::stdout().flush().ok();
+
+    if let Some(addr) = discover_pool(3) {
+        execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+        println!("  Found pool server at: {}", addr);
+        execute!(io::stdout(), ResetColor).ok();
+        println!();
+        print!("  Connect to {}? [Y/n]: ", addr);
+        io::stdout().flush().ok();
+
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf).ok();
+        let answer = buf.trim().to_lowercase();
+
+        if answer.is_empty() || answer == "y" || answer == "yes" {
+            return addr;
+        }
+    } else {
+        execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+        println!("  No pool found automatically.");
+        execute!(io::stdout(), ResetColor).ok();
+    }
+
+    // Fall back to manual entry
+    println!();
+    execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
+    print!("  Enter server IP (default 192.168.1.2): ");
     execute!(io::stdout(), ResetColor).ok();
     io::stdout().flush().ok();
 
