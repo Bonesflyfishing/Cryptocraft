@@ -64,8 +64,9 @@ impl MinerConn {
 pub struct PoolState {
     pub blockchain:   Blockchain,
     pub save_file:    String,
-    pub miners:       HashMap<String, MinerConn>,  // addr string → conn
+    pub miners:       HashMap<String, MinerConn>,
     pub blocks_total: u64,
+    pub bind_ip:      String,
 }
 
 impl PoolState {
@@ -94,15 +95,16 @@ impl PoolState {
 
 // ── Server entry point ────────────────────────────────────────────────────────
 
-pub fn run(blockchain: Blockchain, save_file: String) {
+pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
     let state = Arc::new(Mutex::new(PoolState {
         blockchain,
         save_file,
         miners: HashMap::new(),
         blocks_total: 0,
+        bind_ip: bind_ip.clone(),
     }));
 
-    let addr    = format!("{}:{}", POOL_HOST, POOL_PORT);
+    let addr     = format!("{}:{}", bind_ip, POOL_PORT);
     let listener = TcpListener::bind(&addr).expect("Failed to bind pool server");
 
     // Spawn UI refresh thread
@@ -257,7 +259,7 @@ fn draw_server_ui(st: &PoolState) {
     execute!(out, SetForegroundColor(Color::Yellow)).ok();
     writeln!(out, "+------------------------------------------------------------------+").ok();
     writeln!(out, "|    CRYPTOCRAFT  Pool Server   {}:{:<5}                      |",
-        POOL_HOST, POOL_PORT).ok();
+        st.bind_ip, POOL_PORT).ok();
     writeln!(out, "+------------------------------------------------------------------+").ok();
     execute!(out, ResetColor).ok();
 
@@ -325,7 +327,7 @@ fn draw_server_ui(st: &PoolState) {
 
     writeln!(out, "--------------------------------------------------------------------").ok();
     execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-    writeln!(out, "  [Ctrl+C] Stop server   Miners connect to: 192.168.1.2:{}       ", POOL_PORT).ok();
+    writeln!(out, "  [Ctrl+C] Stop server   Miners connect to: {}:{}       ", st.bind_ip, POOL_PORT).ok();
     execute!(out, ResetColor).ok();
 
     out.flush().ok();
