@@ -1,5 +1,6 @@
 mod auth;
 mod blockchain;
+mod network;
 mod pool_client;
 mod pool_server;
 mod server;
@@ -128,17 +129,29 @@ fn main() {
             std::thread::sleep(Duration::from_millis(400));
             let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
             clear_screen();
-            println!("  Starting pool server on 0.0.0.0:{}...", pool_server::POOL_PORT);
-            println!("  Miners should connect to: 192.168.1.2:{}", pool_server::POOL_PORT);
-            std::thread::sleep(Duration::from_millis(600));
+
+            // Let user pick which interface to bind on (WiFi or Ethernet)
+            let (bind_ip, display_ip) = network::pick_host_interface();
+
             clear_screen();
-            pool_server::run(blockchain, session.chain_file);
+            execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+            println!("  Starting pool server...");
+            println!("  Bound to    : {}:{}", display_ip, pool_server::POOL_PORT);
+            println!("  Clients use : {}:{}", display_ip, pool_server::POOL_PORT);
+            execute!(io::stdout(), ResetColor).ok();
+            std::thread::sleep(Duration::from_millis(800));
+            clear_screen();
+
+            pool_server::run(blockchain, session.chain_file, bind_ip);
         }
 
         // ── Pool client ───────────────────────────────────────────────────────
         3 | _ => {
             clear_screen();
-            pool_client::run(session.email, miner_name);
+            // Let user pick or enter server address
+            let server_addr = network::pick_server_address(pool_server::POOL_PORT);
+            clear_screen();
+            pool_client::run(session.email, miner_name, server_addr);
         }
     }
 }
