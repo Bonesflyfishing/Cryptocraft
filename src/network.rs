@@ -1,352 +1,463 @@
-// ─── pool_server.rs ───────────────────────────────────────────────────────────
-// TCP mining pool server. Binds to 0.0.0.0:8080 (all interfaces).
-// Distributes block templates to connected miners, accepts the first valid
-// submission, adds it to the blockchain, then broadcasts new work.
-// ─────────────────────────────────────────────────────────────────────────────
+mod auth;
+mod blockchain;
+mod network;
+mod pool_client;
+mod pool_server;
+mod server;
 
-use crate::blockchain::{Block, Blockchain};
-use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}, terminal::{self, ClearType}};
-use serde::{Deserialize, Serialize};
+use auth::{LocalAuthProvider, run_auth_flow};
+use blockchain::*;
+use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor, Stylize}, terminal::{self, ClearType}};
+use rand::Rng;
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
-    io::{self, BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    collections::VecDeque,
+    fs,
+    io::{self, Write},
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use serde::{Deserialize, Serialize};
 
-pub const POOL_PORT: u16  = 8080;
-pub const POOL_HOST: &str = "0.0.0.0";
+const VERSION: &str = "1.0.0";
 
-// ── Wire protocol (newline-delimited JSON) ────────────────────────────────────
+// ---- Banner ------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerMsg {
-    Work   { index: u64, prev_hash: String, difficulty: usize, timestamp: u64, data: String, reward: f64 },
-    Stop,
-    Accepted { block_index: u64, reward: f64 },
-    Rejected { reason: String },
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ClientMsg {
-    Hello    { email: String, name: String },
-    Submit   { index: u64, nonce: u64, hash: String },
-    Hashrate { hr: u64 },
-    Bye,
-}
-
-// ── Per-miner state ───────────────────────────────────────────────────────────
-
-struct MinerConn {
-    email:        String,
-    name:         String,
-    hashrate:     u64,
-    blocks_found: u64,
-    joined:       Instant,
-    writer:       Arc<Mutex<TcpStream>>,
-}
-
-impl MinerConn {
-    fn send(&self, msg: &ServerMsg) -> bool {
-        if let Ok(mut w) = self.writer.lock() {
-            let mut line = serde_json::to_string(msg).unwrap_or_default();
-            line.push('\n');
-            w.write_all(line.as_bytes()).is_ok()
-        } else { false }
-    }
-}
-
-// ── Shared pool state ─────────────────────────────────────────────────────────
-
-pub struct PoolState {
-    pub blockchain:   Blockchain,
-    pub save_file:    String,
-    pub miners:       HashMap<String, MinerConn>,
-    pub blocks_total: u64,
-    pub bind_ip:      String,
-}
-
-impl PoolState {
-    fn broadcast(&self, msg: &ServerMsg) {
-        for conn in self.miners.values() {
-            conn.send(msg);
-        }
-    }
-
-    fn build_work(&self) -> ServerMsg {
-        let bc = &self.blockchain;
-        ServerMsg::Work {
-            index:      bc.next_index(),
-            prev_hash:  bc.latest_hash().to_string(),
-            difficulty: bc.difficulty,
-            timestamp:  crate::blockchain::now_secs(),
-            data:       format!("CryptoCraft Pool Block #{}", bc.next_index()),
-            reward:     bc.current_reward(),
-        }
-    }
-
-    fn total_hashrate(&self) -> u64 {
-        self.miners.values().map(|m| m.hashrate).sum()
-    }
-}
-
-// ── Server entry point ────────────────────────────────────────────────────────
-
-pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
-    let state = Arc::new(Mutex::new(PoolState {
-        blockchain,
-        save_file,
-        miners: HashMap::new(),
-        blocks_total: 0,
-        bind_ip: bind_ip.clone(),
-    }));
-
-    let addr     = format!("{}:{}", bind_ip, POOL_PORT);
-    let listener = TcpListener::bind(&addr).expect("Failed to bind pool server");
-
-    // Spawn UI refresh thread
-    {
-        let s = state.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Ok(st) = s.lock() { draw_server_ui(&st); }
-        });
-    }
-
-    // Accept loop
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                let s2 = state.clone();
-                std::thread::spawn(move || handle_client(s, s2));
-            }
-            Err(_) => {}
-        }
-    }
-}
-
-// ── Client handler (one thread per connection) ────────────────────────────────
-
-fn handle_client(stream: TcpStream, state: Arc<Mutex<PoolState>>) {
-    let addr   = stream.peer_addr().map(|a| a.to_string()).unwrap_or("?".into());
-    let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone stream")));
-    let reader = BufReader::new(stream);
-
-    let mut email = String::from("unknown");
-    let mut name  = String::from("unknown");
-    let mut authed = false;
-
-    // Send current work immediately after Hello
-    let send_work = |w: &Arc<Mutex<TcpStream>>, st: &Arc<Mutex<PoolState>>| {
-        if let Ok(st) = st.lock() {
-            let msg  = st.build_work();
-            let line = serde_json::to_string(&msg).unwrap_or_default() + "\n";
-            if let Ok(mut w) = w.lock() { let _ = w.write_all(line.as_bytes()); }
-        }
-    };
-
-    for line in reader.lines() {
-        let line = match line { Ok(l) => l, Err(_) => break };
-        if line.trim().is_empty() { continue; }
-
-        let msg: ClientMsg = match serde_json::from_str(&line) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        match msg {
-            // ── Handshake ────────────────────────────────────────────────────
-            ClientMsg::Hello { email: e, name: n } => {
-                email  = e;
-                name   = n.clone();
-                authed = true;
-
-                let conn = MinerConn {
-                    email:        email.clone(),
-                    name:         name.clone(),
-                    hashrate:     0,
-                    blocks_found: 0,
-                    joined:       Instant::now(),
-                    writer:       writer.clone(),
-                };
-
-                if let Ok(mut st) = state.lock() {
-                    st.miners.insert(addr.clone(), conn);
-                }
-                send_work(&writer, &state);
-            }
-
-            // ── Block submission ─────────────────────────────────────────────
-            ClientMsg::Submit { index, nonce, hash } => {
-                if !authed { continue; }
-
-                let mut st = match state.lock() { Ok(s) => s, Err(_) => continue };
-
-                // Validate: correct index, valid hash prefix
-                let expected_index = st.blockchain.next_index();
-                let difficulty     = st.blockchain.difficulty;
-                let prefix         = "0".repeat(difficulty);
-
-                if index != expected_index {
-                    let msg = ServerMsg::Rejected { reason: "stale block".into() };
-                    if let Ok(mut w) = writer.lock() {
-                        let _ = w.write_all((serde_json::to_string(&msg).unwrap() + "\n").as_bytes());
-                    }
-                    continue;
-                }
-
-                if !hash.starts_with(&prefix) {
-                    let msg = ServerMsg::Rejected { reason: "invalid hash".into() };
-                    if let Ok(mut w) = writer.lock() {
-                        let _ = w.write_all((serde_json::to_string(&msg).unwrap() + "\n").as_bytes());
-                    }
-                    continue;
-                }
-
-                // Accept — add block
-                let block  = st.blockchain.add_block(nonce, hash, 0);
-                st.blockchain.save(&st.save_file);
-                st.blocks_total += 1;
-
-                // Credit the winning miner
-                if let Some(conn) = st.miners.get_mut(&addr) {
-                    conn.blocks_found += 1;
-                }
-
-                // Tell winner
-                let accept = ServerMsg::Accepted { block_index: block.index, reward: block.reward };
-                if let Ok(mut w) = writer.lock() {
-                    let _ = w.write_all((serde_json::to_string(&accept).unwrap() + "\n").as_bytes());
-                }
-
-                // Stop all, then send new work
-                let stop = ServerMsg::Stop;
-                let work = st.build_work();
-                for (a, conn) in &st.miners {
-                    if a != &addr { conn.send(&stop); }
-                    conn.send(&work);
-                }
-            }
-
-            // ── Hashrate report ──────────────────────────────────────────────
-            ClientMsg::Hashrate { hr } => {
-                if let Ok(mut st) = state.lock() {
-                    if let Some(conn) = st.miners.get_mut(&addr) {
-                        conn.hashrate = hr;
-                    }
-                }
-            }
-
-            ClientMsg::Bye => break,
-        }
-    }
-
-    // Disconnected
-    if let Ok(mut st) = state.lock() {
-        st.miners.remove(&addr);
-    }
-}
-
-// ── Server terminal UI ────────────────────────────────────────────────────────
-
-fn draw_server_ui(st: &PoolState) {
+fn print_banner() {
     let mut out = io::stdout();
-    execute!(out, cursor::MoveTo(0, 0)).ok();
-
     execute!(out, SetForegroundColor(Color::Yellow)).ok();
-    writeln!(out, "+------------------------------------------------------------------+").ok();
-    writeln!(out, "|    CRYPTOCRAFT  Pool Server   {}:{:<5}                      |",
-        st.bind_ip, POOL_PORT).ok();
-    writeln!(out, "+------------------------------------------------------------------+").ok();
-    execute!(out, ResetColor).ok();
-
-    // Chain stats
-    execute!(out, SetForegroundColor(Color::Green)).ok();
-    writeln!(out, "  Chain Length  : {:<10}  Difficulty : {} zeros",
-        st.blockchain.chain.len(), st.blockchain.difficulty).ok();
-    writeln!(out, "  Blocks Found  : {:<10}  CC Mined   : {:.4} CC",
-        st.blocks_total, st.blockchain.total_mined).ok();
-    writeln!(out, "  Pool Hashrate : {}",
-        fmt_hr(st.total_hashrate())).ok();
-    execute!(out, ResetColor).ok();
-
-    writeln!(out, "--------------------------------------------------------------------").ok();
-
-    // Miner table
-    execute!(out, SetForegroundColor(Color::Cyan)).ok();
-    writeln!(out, "  Connected Miners ({}):", st.miners.len()).ok();
-    execute!(out, ResetColor).ok();
-
-    writeln!(out, "  {:<20} {:<16} {:<12} {:<10}", "Name", "Hashrate", "Blocks", "Uptime").ok();
-    writeln!(out, "  {:-<20} {:-<16} {:-<12} {:-<10}", "", "", "", "").ok();
-
-    let mut miners: Vec<_> = st.miners.values().collect();
-    miners.sort_by(|a, b| b.hashrate.cmp(&a.hashrate));
-
-    for m in &miners {
-        execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-        writeln!(out, "  {:<20} {:<16} {:<12} {:<10}",
-            truncate(&m.name, 19),
-            fmt_hr(m.hashrate),
-            m.blocks_found,
-            fmt_uptime(m.joined.elapsed().as_secs()),
-        ).ok();
-    }
-    execute!(out, ResetColor).ok();
-
-    // Pad empty rows so layout is stable
-    for _ in 0..(5usize.saturating_sub(miners.len())) {
-        writeln!(out, "{:70}", "").ok();
-    }
-
-    writeln!(out, "--------------------------------------------------------------------").ok();
-
-    // Recent blocks
-    execute!(out, SetForegroundColor(Color::Green)).ok();
-    writeln!(out, "  Recent Blocks:").ok();
-    execute!(out, ResetColor).ok();
-
-    let recent: Vec<_> = st.blockchain.chain.iter().rev().skip(1).take(4).collect();
-    for b in &recent {
-        execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-        writeln!(out, "    #{:<5} | {}...{} | {} zeros | {:.4} CC | {}",
-            b.index,
-            &b.hash[..8], &b.hash[56..],
-            b.hash.chars().take_while(|&c| c == '0').count(),
-            b.reward,
-            &b.miner,
-        ).ok();
-    }
-    for _ in 0..(4usize.saturating_sub(recent.len())) {
-        writeln!(out, "{:70}", "").ok();
-    }
-    execute!(out, ResetColor).ok();
-
-    writeln!(out, "--------------------------------------------------------------------").ok();
+    writeln!(out, r"
+   ___  ____  _  _  ____  ____  ____  ___  ____   __   ____  ____
+  / __)(  _ \( \/ )(  _ \(_  _)( ___)(__ \(  _ \ / _\ (  __)(_  _)
+ ( (__  )   / \  /  )___/  )(   )__)  / _/ )   //    \ ) _)   )(
+  \___)(__\_) (__) (__)   (__) (____) (__)(____/ \_/\_/(__)   (__)
+    ").ok();
     execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-    writeln!(out, "  [Ctrl+C] Stop server   Miners connect to: {}:{}       ", st.bind_ip, POOL_PORT).ok();
+    writeln!(out, "       Proof-of-Work Blockchain Mining Engine  |  v{}", VERSION).ok();
     execute!(out, ResetColor).ok();
-
+    writeln!(out).ok();
     out.flush().ok();
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn fmt_hr(hr: u64) -> String {
-    if hr >= 1_000_000 { format!("{:.2} MH/s", hr as f64 / 1_000_000.0) }
-    else if hr >= 1_000 { format!("{:.2} KH/s", hr as f64 / 1_000.0) }
-    else { format!("{} H/s", hr) }
+fn clear_screen() {
+    execute!(io::stdout(), terminal::Clear(ClearType::All), cursor::MoveTo(0, 0)).ok();
 }
 
-fn fmt_uptime(s: u64) -> String {
-    if s < 60 { format!("{}s", s) }
-    else if s < 3600 { format!("{}m {}s", s/60, s%60) }
-    else { format!("{}h {}m", s/3600, (s%3600)/60) }
+// ---- Mode selector -----------------------------------------------------------
+
+fn pick_mode() -> u8 {
+    loop {
+        execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+        println!("  +----------------------------------+");
+        println!("  |   Select Mode                    |");
+        println!("  +----------------------------------+");
+        execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
+        println!("  [1] Solo Mine         (this machine only)");
+        println!("  [2] Host Mining Pool  (this machine is the server)");
+        println!("  [3] Join Mining Pool  (connect to 192.168.1.2:8080)");
+        execute!(io::stdout(), ResetColor).ok();
+        println!();
+        print!("  Choice: ");
+        io::stdout().flush().ok();
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf).ok();
+        match buf.trim() {
+            "1" => return 1,
+            "2" => return 2,
+            "3" => return 3,
+            _   => println!("  Please enter 1, 2, or 3.\n"),
+        }
+    }
 }
 
-fn truncate(s: &str, n: usize) -> &str {
-    if s.len() <= n { s } else { &s[..n] }
+// ---- Main --------------------------------------------------------------------
+
+fn main() {
+    clear_screen();
+    print_banner();
+
+    // Auth
+    let mut auth_provider  = LocalAuthProvider::load();
+    let has_users          = auth_provider.has_users();
+    let session            = run_auth_flow(&mut auth_provider, has_users);
+
+    let miner_name = session.email
+        .split('@').next().unwrap_or("miner").to_string();
+
+    clear_screen();
+    print_banner();
+
+    let mode = pick_mode();
+    clear_screen();
+
+    match mode {
+        // ── Solo mining ───────────────────────────────────────────────────────
+        1 => {
+            print_banner();
+            println!("  Loading chain for {}...", miner_name);
+            std::thread::sleep(Duration::from_millis(400));
+
+            let mut blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+            println!(
+                "  Chain: {} blocks  |  Difficulty: {}  |  Earned: {:.4} CC",
+                blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
+            );
+
+            // Start dashboard server
+            let dashboard_html = include_str!("../dashboard.html")
+                .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
+            let srv_state = server::ServerState::new(&session.chain_file);
+            server::spawn(srv_state.clone(), dashboard_html);
+            let ip = server::local_ip();
+            execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+            println!("  Dashboard : http://{}:{}/", ip, server::PORT);
+            execute!(io::stdout(), ResetColor).ok();
+            std::thread::sleep(Duration::from_millis(800));
+            clear_screen();
+
+            run_solo_miner(blockchain, session.chain_file.clone(), miner_name, session.email, ip);
+        }
+
+        // ── Pool server ───────────────────────────────────────────────────────
+        2 => {
+            println!("  Loading chain for pool server...");
+            std::thread::sleep(Duration::from_millis(400));
+            let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+            clear_screen();
+
+            // Let user pick which interface to bind on (WiFi or Ethernet)
+            let (bind_ip, display_ip) = network::pick_host_interface();
+
+            clear_screen();
+            execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+            println!("  Starting pool server...");
+            println!("  Bound to    : {}:{}", display_ip, pool_server::POOL_PORT);
+            println!("  Clients use : {}:{}", display_ip, pool_server::POOL_PORT);
+            execute!(io::stdout(), ResetColor).ok();
+            std::thread::sleep(Duration::from_millis(800));
+            clear_screen();
+
+            pool_server::run(blockchain, session.chain_file, bind_ip);
+        }
+
+        // ── Pool client ───────────────────────────────────────────────────────
+        3 | _ => {
+            clear_screen();
+            // Let user pick or enter server address
+            let server_addr = network::pick_server_address(pool_server::POOL_PORT);
+            clear_screen();
+            pool_client::run(session.email, miner_name, server_addr);
+        }
+    }
+}
+
+// ---- Solo miner (unchanged from before) --------------------------------------
+
+fn run_solo_miner(
+    mut blockchain: Blockchain,
+    chain_file:     String,
+    miner_name:     String,
+    email:          String,
+    local_ip:       String,
+) {
+    let user_quit    = Arc::new(AtomicBool::new(false));
+    let mine_stop    = Arc::new(AtomicBool::new(false));
+    let hash_counter = Arc::new(AtomicU64::new(0));
+    let peek_hash    = Arc::new(Mutex::new("0".repeat(16)));
+
+    {
+        let uq = user_quit.clone();
+        ctrlc::set_handler(move || { uq.store(true, Ordering::SeqCst); })
+            .expect("ctrlc handler");
+    }
+
+    let mut ui           = Ui::new();
+    let mut blocks_found = 0u64;
+    let mut flavor       = random_flavor();
+    let mut flavor_t     = Instant::now();
+
+    'outer: while !user_quit.load(Ordering::Relaxed) {
+        let template = Block {
+            index:         blockchain.next_index(),
+            timestamp:     now_secs(),
+            data:          format!("CryptoCraft Block #{}", blockchain.next_index()),
+            previous_hash: blockchain.latest_hash().to_string(),
+            hash:          String::new(),
+            nonce:         0,
+            difficulty:    blockchain.difficulty,
+            miner:         miner_name.clone(),
+            reward:        blockchain.current_reward(),
+        };
+
+        let difficulty = blockchain.difficulty;
+        mine_stop.store(false, Ordering::SeqCst);
+
+        let ms  = mine_stop.clone();
+        let hc  = hash_counter.clone();
+        let ph  = peek_hash.clone();
+        let tmp = template.clone();
+
+        let handle = std::thread::spawn(move || mine_parallel(&tmp, difficulty, ms, hc, ph));
+
+        loop {
+            if flavor_t.elapsed() > Duration::from_secs(4) {
+                flavor   = random_flavor();
+                flavor_t = Instant::now();
+            }
+            let hashes = hash_counter.load(Ordering::Relaxed);
+            let peek   = peek_hash.lock().map(|p| p.clone()).unwrap_or_default();
+            ui.draw(&blockchain, hashes, &peek, flavor, blocks_found, &email, &local_ip);
+
+            if user_quit.load(Ordering::Relaxed) {
+                mine_stop.store(true, Ordering::SeqCst);
+                let _ = handle.join();
+                break 'outer;
+            }
+            if handle.is_finished() { break; }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+
+        if user_quit.load(Ordering::Relaxed) { break; }
+
+        match handle.join().ok().flatten() {
+            Some((nonce, hash)) => {
+                let attempts = hash_counter.load(Ordering::Relaxed);
+                let block    = blockchain.add_block(nonce, hash, attempts);
+                blockchain.save(&chain_file);
+                blocks_found += 1;
+                print_found_block(&block);
+                clear_screen();
+            }
+            None => break,
+        }
+    }
+
+    // Shutdown
+    clear_screen();
+    let total_hashes = hash_counter.load(Ordering::Relaxed);
+    execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+    println!("\n  Mining session complete.\n");
+    execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+    println!("  Blocks Found : {}", blocks_found);
+    println!("  Total Hashes : {}", total_hashes);
+    println!("  CC Earned    : {:.4} CC", blockchain.total_mined);
+    println!("  Chain saved  : {}", chain_file);
+    execute!(io::stdout(), ResetColor).ok();
+    println!();
+}
+
+// ---- Mining core (solo) -------------------------------------------------------
+
+fn mine_parallel(
+    template:     &Block,
+    difficulty:   usize,
+    stop:         Arc<AtomicBool>,
+    hash_counter: Arc<AtomicU64>,
+    peek_hash:    Arc<Mutex<String>>,
+) -> Option<(u64, String)> {
+    let prefix    = "0".repeat(difficulty);
+    let n_threads = num_cpus::get().max(1);
+    let chunk     = u64::MAX / n_threads as u64;
+    let result    = Arc::new(Mutex::new(None::<(u64, String)>));
+
+    (0..n_threads).into_par_iter().for_each(|t| {
+        let start     = t as u64 * chunk;
+        let end       = if t == n_threads - 1 { u64::MAX } else { start + chunk };
+        let stop_r    = stop.clone();
+        let counter_r = hash_counter.clone();
+        let peek_r    = peek_hash.clone();
+        let result_r  = result.clone();
+        let prefix_r  = prefix.clone();
+        let mut local = 0u64;
+
+        for nonce in start..=end {
+            if stop_r.load(Ordering::Relaxed) { return; }
+            if result_r.lock().unwrap().is_some() { return; }
+            let hash  = template.compute_hash(nonce);
+            local    += 1;
+            if local % 10_000 == 0 {
+                counter_r.fetch_add(10_000, Ordering::Relaxed);
+                if let Ok(mut p) = peek_r.try_lock() { *p = hash[..16].to_string(); }
+                local = 0;
+            }
+            if hash.starts_with(prefix_r.as_str()) {
+                *result_r.lock().unwrap() = Some((nonce, hash));
+                stop_r.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+    });
+
+    Arc::try_unwrap(result).ok()?.into_inner().ok()?
+}
+
+// ---- UI (solo) ---------------------------------------------------------------
+
+fn difficulty_bar(d: usize) -> String {
+    format!("[{}{}]", "#".repeat(d), ".".repeat(MAX_DIFFICULTY.saturating_sub(d)))
+}
+
+fn fmt_hashrate(hr: f64) -> String {
+    if hr >= 1_000_000.0  { format!("{:.2} MH/s", hr / 1_000_000.0) }
+    else if hr >= 1_000.0 { format!("{:.2} KH/s", hr / 1_000.0) }
+    else                  { format!("{:.2}  H/s", hr) }
+}
+
+fn fmt_duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0      { format!("{}h {}m {}s", h, m, s) }
+    else if m > 0 { format!("{}m {}s", m, s) }
+    else          { format!("{}s", s) }
+}
+
+fn leading_zeros(hash: &str) -> usize {
+    hash.chars().take_while(|&c| c == '0').count()
+}
+
+static FLAVORS: &[&str] = &[
+    "Hammering nonces at full speed...",
+    "Crafting the perfect hash...",
+    "Burning CPU cycles for glory...",
+    "Hunting for leading zeros...",
+    "Deep mining in progress...",
+    "Building the chain, one block at a time...",
+    "Every zero gets us closer...",
+    "The blockchain never sleeps...",
+    "Proof-of-work at its finest...",
+    "SHA-256 at maximum overdrive...",
+];
+
+fn random_flavor() -> &'static str {
+    FLAVORS[rand::thread_rng().gen_range(0..FLAVORS.len())]
+}
+
+struct Ui {
+    start:            Instant,
+    hashrate_history: VecDeque<(Instant, u64)>,
+}
+
+impl Ui {
+    fn new() -> Self { Ui { start: Instant::now(), hashrate_history: VecDeque::with_capacity(15) } }
+
+    fn recent_hashrate(&mut self, hashes: u64) -> f64 {
+        let now = Instant::now();
+        self.hashrate_history.push_back((now, hashes));
+        if self.hashrate_history.len() > 12 { self.hashrate_history.pop_front(); }
+        if self.hashrate_history.len() < 2  { return 0.0; }
+        let (t0, h0) = self.hashrate_history.front().unwrap();
+        let (t1, h1) = self.hashrate_history.back().unwrap();
+        let dt = t1.duration_since(*t0).as_secs_f64();
+        if dt > 0.0 { (h1 - h0) as f64 / dt } else { 0.0 }
+    }
+
+    fn avg_hashrate(&self, hashes: u64) -> f64 {
+        let e = self.start.elapsed().as_secs_f64();
+        if e > 0.0 { hashes as f64 / e } else { 0.0 }
+    }
+
+    fn draw(&mut self, bc: &Blockchain, total_hashes: u64, peek: &str, flavor: &str, blocks_found: u64, email: &str, local_ip: &str) {
+        let mut out    = io::stdout();
+        let up         = self.start.elapsed().as_secs();
+        let rhr        = self.recent_hashrate(total_hashes);
+        let ahr        = self.avg_hashrate(total_hashes);
+        let d          = bc.difficulty;
+        let halving_in = HALVING_INTERVAL - (bc.next_index() % HALVING_INTERVAL);
+
+        execute!(out, cursor::MoveTo(0, 0)).ok();
+
+        execute!(out, SetForegroundColor(Color::Yellow)).ok();
+        writeln!(out, "+------------------------------------------------------------------+").ok();
+        writeln!(out, "|    CRYPTOCRAFT Solo Miner  v{:<5}                              |", VERSION).ok();
+        writeln!(out, "+------------------------------------------------------------------+").ok();
+        execute!(out, ResetColor).ok();
+
+        execute!(out, SetForegroundColor(Color::Cyan)).ok();
+        writeln!(out, "  Account : {:<28}  Uptime : {}", email, fmt_duration(up)).ok();
+        writeln!(out, "  Miner   : {}", bc.miner_name).ok();
+        execute!(out, ResetColor).ok();
+
+        writeln!(out, "--------------------------------------------------------------------").ok();
+        execute!(out, SetForegroundColor(Color::Green)).ok();
+        writeln!(out, "  Blocks Mined  : {:<10}  Total Earned  : {:.4} CC", blocks_found, bc.total_mined).ok();
+        writeln!(out, "  Block Reward  : {:.4} CC    Halving In    : {} blocks", bc.current_reward(), halving_in).ok();
+        execute!(out, ResetColor).ok();
+
+        writeln!(out, "--------------------------------------------------------------------").ok();
+        execute!(out, SetForegroundColor(Color::Magenta)).ok();
+        write!(out, "  Difficulty    : {} leading zeros  ", d).ok();
+        execute!(out, SetForegroundColor(Color::Red)).ok();
+        writeln!(out, "{}", difficulty_bar(d)).ok();
+        execute!(out, ResetColor).ok();
+
+        execute!(out, SetForegroundColor(Color::Yellow)).ok();
+        writeln!(out, "  Avg Hashrate  : {:<20}  Recent : {}", fmt_hashrate(ahr), fmt_hashrate(rhr)).ok();
+        writeln!(out, "  Total Hashes  : {}", total_hashes).ok();
+        execute!(out, ResetColor).ok();
+
+        writeln!(out, "--------------------------------------------------------------------").ok();
+        let target_str = format!("{}{}", "0".repeat(d), "x".repeat(64 - d));
+        execute!(out, SetForegroundColor(Color::Cyan)).ok();
+        writeln!(out, "  Target        : {}", target_str).ok();
+        let hit = peek.len().min(d);
+        write!(out, "  Current Peek  : ").ok();
+        execute!(out, SetForegroundColor(Color::Green)).ok();
+        write!(out, "{}", &peek[..hit]).ok();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
+        writeln!(out, "{:<64}", &peek[hit..]).ok();
+        execute!(out, ResetColor).ok();
+
+        execute!(out, SetForegroundColor(Color::White)).ok();
+        writeln!(out, "  Status        : {:<58}", flavor).ok();
+        execute!(out, ResetColor).ok();
+
+        writeln!(out, "--------------------------------------------------------------------").ok();
+        execute!(out, SetForegroundColor(Color::Green)).ok();
+        writeln!(out, "  Recent Blocks:").ok();
+        execute!(out, ResetColor).ok();
+
+        let recent: Vec<_> = bc.chain.iter().rev().skip(1).take(5).collect();
+        if recent.is_empty() {
+            for _ in 0..5 { writeln!(out, "{:70}", "").ok(); }
+        } else {
+            for blk in &recent {
+                execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
+                writeln!(out, "    #{:<5} | {}...{} | {} zeros | {:.4} CC",
+                    blk.index, &blk.hash[..8], &blk.hash[56..], leading_zeros(&blk.hash), blk.reward).ok();
+            }
+            for _ in 0..(5usize.saturating_sub(recent.len())) { writeln!(out, "{:70}", "").ok(); }
+            execute!(out, ResetColor).ok();
+        }
+
+        writeln!(out, "--------------------------------------------------------------------").ok();
+        execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
+        writeln!(out, "  [Ctrl+C] Stop & save                                              ").ok();
+        execute!(out, SetForegroundColor(Color::Cyan)).ok();
+        writeln!(out, "  Dashboard     : http://{}:{}/", local_ip, server::PORT).ok();
+        execute!(out, ResetColor).ok();
+        out.flush().ok();
+    }
+}
+
+fn print_found_block(block: &Block) {
+    let mut out = io::stdout();
+    clear_screen();
+    execute!(out, SetForegroundColor(Color::Yellow)).ok();
+    writeln!(out, "\n\n  +---------------------------------------------------+").ok();
+    writeln!(out,     "  |        BLOCK FOUND!  New block mined!            |").ok();
+    writeln!(out,     "  +---------------------------------------------------+\n").ok();
+    execute!(out, SetForegroundColor(Color::Green)).ok();
+    writeln!(out, "  Block Index   : #{}", block.index).ok();
+    writeln!(out, "  Nonce         : {}", block.nonce).ok();
+    writeln!(out, "  Hash          : {}", block.hash).ok();
+    writeln!(out, "  Leading Zeros : {}", leading_zeros(&block.hash)).ok();
+    writeln!(out, "  Reward        : {:.4} CC", block.reward).ok();
+    writeln!(out, "  Difficulty    : {}", block.difficulty).ok();
+    execute!(out, ResetColor).ok();
+    out.flush().ok();
+    std::thread::sleep(Duration::from_millis(1200));
 }
