@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
-pub const BLOCK_REWARD: f64               = 15;
+pub const BLOCK_REWARD: f64               = 15.0;
 pub const HALVING_INTERVAL: u64           = 100;
 pub const TARGET_BLOCK_TIME_SECS: f64     = 480.0;
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 10;
@@ -135,4 +135,5 @@ impl Blockchain {
         }
     }
 }
+
 
