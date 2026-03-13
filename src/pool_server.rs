@@ -4,19 +4,21 @@
 // submission, adds it to the blockchain, then broadcasts new work.
 // ─────────────────────────────────────────────────────────────────────────────
 
-use crate::blockchain::{Block, Blockchain};
-use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}, terminal::{self, ClearType}};
+use crate::blockchain::Blockchain;
+use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::{self, BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-pub const POOL_PORT: u16  = 8080;
-pub const POOL_HOST: &str = "0.0.0.0";
+pub const POOL_PORT: u16      = 8080;
+pub const DISCOVERY_PORT: u16 = 8081;
+pub const DISCOVERY_PING: &str = "CRYPTOCRAFT_DISCOVER_V1";
+pub const DISCOVERY_PONG: &str = "CRYPTOCRAFT_POOL_V1";
 
 // ── Wire protocol (newline-delimited JSON) ────────────────────────────────────
 
@@ -113,6 +115,30 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(500));
             if let Ok(st) = s.lock() { draw_server_ui(&st); }
+        });
+    }
+
+    // Spawn UDP discovery responder
+    // Listens for CRYPTOCRAFT_DISCOVER_V1 broadcasts and replies with
+    // CRYPTOCRAFT_POOL_V1 so clients can find us automatically.
+    {
+        let ip = bind_ip.clone();
+        std::thread::spawn(move || {
+            let sock = match UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = [0u8; 64];
+            loop {
+                if let Ok((len, src)) = sock.recv_from(&mut buf) {
+                    let msg = std::str::from_utf8(&buf[..len]).unwrap_or("");
+                    if msg.trim() == DISCOVERY_PING {
+                        let reply = format!("{}|{}:{}", DISCOVERY_PONG, ip, POOL_PORT);
+                        let _ = sock.send_to(reply.as_bytes(), src);
+                    }
+                }
+            }
         });
     }
 
