@@ -6,15 +6,71 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
-pub const BLOCK_REWARD: f64               = 15.0;
+pub const BLOCK_REWARD: f64               = 12;
 pub const HALVING_INTERVAL: u64           = 100;
-pub const TARGET_BLOCK_TIME_SECS: f64     = 480.0;
+pub const TARGET_BLOCK_TIME_SECS: f64     = 120;  // target 2 minutes per block
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 10;
-pub const MAX_DIFFICULTY: usize           = 8;
-pub const MIN_DIFFICULTY: usize           = 5;
+pub const MAX_DIFFICULTY: usize           = 16;
+pub const MIN_DIFFICULTY: usize           = 1;
 
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+// ── CPU benchmark ─────────────────────────────────────────────────────────────
+// Hashes as fast as possible for `duration_secs` seconds across all cores,
+// then returns the measured hashrate and the recommended starting difficulty.
+//
+// Formula: difficulty = floor(log16(hashrate * target_block_time))
+// Clamped to [MIN_DIFFICULTY, MAX_DIFFICULTY].
+pub fn benchmark_difficulty(duration_secs: f64) -> (u64, usize) {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    let counter   = std::sync::Arc::new(AtomicU64::new(0));
+    let stop      = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let n_threads = num_cpus::get().max(1);
+    let start     = Instant::now();
+
+    // Signal threads to stop after duration
+    {
+        let s = stop.clone();
+        let dur = std::time::Duration::from_secs_f64(duration_secs);
+        std::thread::spawn(move || {
+            std::thread::sleep(dur);
+            s.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    (0..n_threads).into_par_iter().for_each(|t| {
+        let c = counter.clone();
+        let s = stop.clone();
+        let mut nonce: u64 = t as u64 * (u64::MAX / n_threads as u64);
+        let mut local = 0u64;
+        while !s.load(Ordering::Relaxed) {
+            // Just hash — content doesn't matter for benchmarking
+            let raw = format!("benchmark{}", nonce);
+            let mut h = Sha256::new();
+            h.update(raw.as_bytes());
+            let _ = hex::encode(h.finalize());
+            local += 1;
+            if local % 5_000 == 0 {
+                c.fetch_add(5_000, Ordering::Relaxed);
+                local = 0;
+            }
+            nonce = nonce.wrapping_add(1);
+        }
+    });
+
+    let elapsed  = start.elapsed().as_secs_f64().max(0.1);
+    let hashrate = (counter.load(std::sync::atomic::Ordering::Relaxed) as f64 / elapsed) as u64;
+
+    // log16(hashrate * target_time) = log2(hashrate * target_time) / log2(16) = / 4
+    let ideal = (hashrate as f64 * TARGET_BLOCK_TIME_SECS).log2() / 4.0;
+    let diff  = (ideal.floor() as usize).clamp(MIN_DIFFICULTY, MAX_DIFFICULTY);
+
+    (hashrate, diff)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,5 +191,3 @@ impl Blockchain {
         }
     }
 }
-
-
