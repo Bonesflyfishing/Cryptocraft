@@ -59,7 +59,9 @@ fn pick_mode() -> u8 {
         execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
         println!("  [1] Solo Mine         (this machine only)");
         println!("  [2] Host Mining Pool  (this machine is the server)");
-        println!("  [3] Join Mining Pool  (connect to 192.168.1.2:8080)");
+        println!("  [3] Join Mining Pool  (connect to pool server)");
+        execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+        println!("  [4] Exit");
         execute!(io::stdout(), ResetColor).ok();
         println!();
         print!("  Choice: ");
@@ -70,7 +72,8 @@ fn pick_mode() -> u8 {
             "1" => return 1,
             "2" => return 2,
             "3" => return 3,
-            _   => println!("  Please enter 1, 2, or 3.\n"),
+            "4" => return 4,
+            _   => println!("  Please enter 1, 2, 3, or 4.\n"),
         }
     }
 }
@@ -81,7 +84,7 @@ fn main() {
     clear_screen();
     print_banner();
 
-    // Auth
+    // Auth — only happens once at startup
     let mut auth_provider  = LocalAuthProvider::load();
     let has_users          = auth_provider.has_users();
     let session            = run_auth_flow(&mut auth_provider, has_users);
@@ -89,70 +92,91 @@ fn main() {
     let miner_name = session.email
         .split('@').next().unwrap_or("miner").to_string();
 
-    clear_screen();
-    print_banner();
+    // ── Main menu loop — stays logged in until [4] Exit ───────────────────────
+    loop {
+        clear_screen();
+        print_banner();
 
-    let mode = pick_mode();
-    clear_screen();
+        execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+        println!("  Logged in as: {}\n", session.email);
+        execute!(io::stdout(), ResetColor).ok();
 
-    match mode {
-        // ── Solo mining ───────────────────────────────────────────────────────
-        1 => {
-            print_banner();
-            println!("  Loading chain for {}...", miner_name);
-            std::thread::sleep(Duration::from_millis(400));
+        let mode = pick_mode();
+        clear_screen();
 
-            let mut blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
-            println!(
-                "  Chain: {} blocks  |  Difficulty: {}  |  Earned: {:.4} CC",
-                blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
-            );
+        match mode {
+            // ── Solo mining ───────────────────────────────────────────────────
+            1 => {
+                print_banner();
+                println!("  Loading chain for {}...", miner_name);
+                std::thread::sleep(Duration::from_millis(400));
 
-            // Start dashboard server
-            let dashboard_html = include_str!("../dashboard.html")
-                .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
-            let srv_state = server::ServerState::new(&session.chain_file);
-            server::spawn(srv_state.clone(), dashboard_html);
-            let ip = server::local_ip();
-            execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
-            println!("  Dashboard : http://{}:{}/", ip, server::PORT);
-            execute!(io::stdout(), ResetColor).ok();
-            std::thread::sleep(Duration::from_millis(800));
-            clear_screen();
+                let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+                println!(
+                    "  Chain: {} blocks  |  Difficulty: {}  |  Earned: {:.4} CC",
+                    blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
+                );
 
-            run_solo_miner(blockchain, session.chain_file.clone(), miner_name, session.email, ip);
+                let dashboard_html = include_str!("../dashboard.html")
+                    .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
+                let srv_state = server::ServerState::new(&session.chain_file);
+                server::spawn(srv_state.clone(), dashboard_html);
+                let ip = server::local_ip();
+                execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+                println!("  Dashboard : http://{}:{}/", ip, server::PORT);
+                execute!(io::stdout(), ResetColor).ok();
+                std::thread::sleep(Duration::from_millis(800));
+                clear_screen();
+
+                run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip);
+                // returns here when user presses Ctrl+C — loop continues to menu
+            }
+
+            // ── Pool server ───────────────────────────────────────────────────
+            2 => {
+                println!("  Loading chain for pool server...");
+                std::thread::sleep(Duration::from_millis(400));
+                let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+                clear_screen();
+
+                let (bind_ip, display_ip) = network::pick_host_interface();
+                clear_screen();
+                execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+                println!("  Starting pool server...");
+                println!("  Bound to    : {}:{}", display_ip, pool_server::POOL_PORT);
+                println!("  Clients use : {}:{}", display_ip, pool_server::POOL_PORT);
+                execute!(io::stdout(), ResetColor).ok();
+                std::thread::sleep(Duration::from_millis(800));
+                clear_screen();
+
+                pool_server::run(blockchain, session.chain_file.clone(), bind_ip);
+                // returns here when user presses Ctrl+C — loop continues to menu
+            }
+
+            // ── Pool client ───────────────────────────────────────────────────
+            3 => {
+                clear_screen();
+                let server_addr = network::pick_server_address(pool_server::POOL_PORT);
+                clear_screen();
+                pool_client::run(session.email.clone(), miner_name.clone(), server_addr);
+                // returns here when user presses Ctrl+C — loop continues to menu
+            }
+
+            // ── Exit ─────────────────────────────────────────────────────────
+            4 | _ => {
+                clear_screen();
+                execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
+                println!("\n  Goodbye, {}!\n", miner_name);
+                execute!(io::stdout(), ResetColor).ok();
+                break;
+            }
         }
 
-        // ── Pool server ───────────────────────────────────────────────────────
-        2 => {
-            println!("  Loading chain for pool server...");
-            std::thread::sleep(Duration::from_millis(400));
-            let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
-            clear_screen();
-
-            // Let user pick which interface to bind on (WiFi or Ethernet)
-            let (bind_ip, display_ip) = network::pick_host_interface();
-
-            clear_screen();
-            execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
-            println!("  Starting pool server...");
-            println!("  Bound to    : {}:{}", display_ip, pool_server::POOL_PORT);
-            println!("  Clients use : {}:{}", display_ip, pool_server::POOL_PORT);
-            execute!(io::stdout(), ResetColor).ok();
-            std::thread::sleep(Duration::from_millis(800));
-            clear_screen();
-
-            pool_server::run(blockchain, session.chain_file, bind_ip);
-        }
-
-        // ── Pool client ───────────────────────────────────────────────────────
-        3 | _ => {
-            clear_screen();
-            // Let user pick or enter server address
-            let server_addr = network::pick_server_address(pool_server::POOL_PORT);
-            clear_screen();
-            pool_client::run(session.email, miner_name, server_addr);
-        }
+        // Brief pause and confirmation before going back to menu
+        execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+        println!("\n  Returning to main menu...");
+        execute!(io::stdout(), ResetColor).ok();
+        std::thread::sleep(Duration::from_millis(800));
     }
 }
 
@@ -170,10 +194,20 @@ fn run_solo_miner(
     let hash_counter = Arc::new(AtomicU64::new(0));
     let peek_hash    = Arc::new(Mutex::new("0".repeat(16)));
 
+    // Spawn a stdin reader thread — type Q + Enter to return to menu
     {
         let uq = user_quit.clone();
-        ctrlc::set_handler(move || { uq.store(true, Ordering::SeqCst); })
-            .expect("ctrlc handler");
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                if let Ok(l) = line {
+                    if l.trim().eq_ignore_ascii_case("q") {
+                        uq.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     let mut ui           = Ui::new();
@@ -435,7 +469,7 @@ impl Ui {
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-        writeln!(out, "  [Ctrl+C] Stop & save                                              ").ok();
+        writeln!(out, "  [Q + Enter] Back to menu                                          ").ok();
         execute!(out, SetForegroundColor(Color::Cyan)).ok();
         writeln!(out, "  Dashboard     : http://{}:{}/", local_ip, server::PORT).ok();
         execute!(out, ResetColor).ok();
