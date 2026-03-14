@@ -98,6 +98,26 @@ impl PoolState {
 // ── Server entry point ────────────────────────────────────────────────────────
 
 pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let quit = Arc::new(AtomicBool::new(false));
+
+    // Spawn stdin reader — type Q + Enter to stop server and return to menu
+    {
+        let q = quit.clone();
+        std::thread::spawn(move || {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                if let Ok(l) = line {
+                    if l.trim().eq_ignore_ascii_case("q") {
+                        q.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     let state = Arc::new(Mutex::new(PoolState {
         blockchain,
         save_file,
@@ -108,29 +128,32 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
 
     let addr     = format!("{}:{}", bind_ip, POOL_PORT);
     let listener = TcpListener::bind(&addr).expect("Failed to bind pool server");
+    listener.set_nonblocking(true).expect("set_nonblocking");
 
     // Spawn UI refresh thread
     {
         let s = state.clone();
+        let q = quit.clone();
         std::thread::spawn(move || loop {
+            if q.load(Ordering::Relaxed) { break; }
             std::thread::sleep(Duration::from_millis(500));
             if let Ok(st) = s.lock() { draw_server_ui(&st); }
         });
     }
 
     // Spawn UDP discovery responder
-    // Listens for CRYPTOCRAFT_DISCOVER_V1 broadcasts and replies with
-    // CRYPTOCRAFT_POOL_V1 so clients can find us automatically.
     {
         let ip = bind_ip.clone();
+        let q  = quit.clone();
         std::thread::spawn(move || {
             let sock = match UdpSocket::bind(format!("0.0.0.0:{}", DISCOVERY_PORT)) {
                 Ok(s) => s,
                 Err(_) => return,
             };
-            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
             let mut buf = [0u8; 64];
             loop {
+                if q.load(Ordering::Relaxed) { break; }
                 if let Ok((len, src)) = sock.recv_from(&mut buf) {
                     let msg = std::str::from_utf8(&buf[..len]).unwrap_or("");
                     if msg.trim() == DISCOVERY_PING {
@@ -142,12 +165,23 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
         });
     }
 
-    // Accept loop
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
+    // Accept loop — non-blocking so we can check quit flag
+    loop {
+        if quit.load(Ordering::Relaxed) {
+            // Save chain before returning to menu
+            if let Ok(st) = state.lock() {
+                st.blockchain.save(&st.save_file);
+            }
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_nonblocking(false);
                 let s2 = state.clone();
-                std::thread::spawn(move || handle_client(s, s2));
+                std::thread::spawn(move || handle_client(stream, s2));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => {}
         }
@@ -353,7 +387,7 @@ fn draw_server_ui(st: &PoolState) {
 
     writeln!(out, "--------------------------------------------------------------------").ok();
     execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-    writeln!(out, "  [Ctrl+C] Stop server   Miners connect to: {}:{}       ", st.bind_ip, POOL_PORT).ok();
+    writeln!(out, "  [Q + Enter] Back to menu   Miners connect to: {}:{}  ", st.bind_ip, POOL_PORT).ok();
     execute!(out, ResetColor).ok();
 
     out.flush().ok();
