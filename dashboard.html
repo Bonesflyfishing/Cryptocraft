@@ -836,8 +836,6 @@ const chartDefaults = {
   }
 };
 
-let chartHashrate = null;
-
 function renderCharts() {
   const minedBlocks = chain.chain.filter(b => b.index > 0);
   const labels      = minedBlocks.map(b => '#' + b.index);
