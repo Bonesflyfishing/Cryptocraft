@@ -73,10 +73,22 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     let peek_hash     = Arc::new(Mutex::new("0".repeat(16)));
     let user_quit     = Arc::new(AtomicBool::new(false));
 
+    // Spawn stdin reader — type Q + Enter to disconnect and return to menu
     {
         let uq = user_quit.clone();
-        ctrlc::set_handler(move || { uq.store(true, Ordering::SeqCst); })
-            .expect("ctrlc handler");
+        let sm = stop_mining.clone();
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                if let Ok(l) = line {
+                    if l.trim().eq_ignore_ascii_case("q") {
+                        sm.store(true, Ordering::SeqCst);
+                        uq.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     // ── UI state ──────────────────────────────────────────────────────────────
@@ -387,7 +399,7 @@ impl ClientUi {
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-        writeln!(out, "  [Ctrl+C] Disconnect from pool                                    ").ok();
+        writeln!(out, "  [Q + Enter] Back to menu                                         ").ok();
         execute!(out, ResetColor).ok();
 
         out.flush().ok();
