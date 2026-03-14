@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
     fs,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -199,7 +199,8 @@ fn run_solo_miner(
         let uq = user_quit.clone();
         std::thread::spawn(move || {
             let stdin = io::stdin();
-            for line in stdin.lock().lines() {
+            let locked = stdin.lock();
+            for line in locked.lines() {
                 if let Ok(l) = line {
                     if l.trim().eq_ignore_ascii_case("q") {
                         uq.store(true, Ordering::SeqCst);
