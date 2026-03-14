@@ -277,12 +277,13 @@
   /* ── Charts row ── */
   .charts-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 16px;
     margin-bottom: 28px;
   }
 
-  @media (max-width: 768px) { .charts-row { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .charts-row { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 600px) { .charts-row { grid-template-columns: 1fr; } }
 
   .panel {
     background: var(--bg2);
@@ -535,8 +536,6 @@
   .text-green { color: var(--green); }
   .mono { font-family: var(--font-mono); }
 
-  input[type="file"] { display: none; }
-
   .blink { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 </style>
@@ -546,42 +545,20 @@
 <header>
   <div class="logo">CRYPTO<span>CRAFT</span> ⛏</div>
   <div class="header-right">
-    <span id="status-indicator"><span class="status-dot offline" id="status-dot"></span><span id="status-text">NO CHAIN LOADED</span></span>
+    <span id="status-indicator"><span class="status-dot offline" id="status-dot"></span><span id="status-text">CONNECTING...</span></span>
     <span id="header-miner" class="text-dim"></span>
-    <button class="btn" onclick="pickFile()">LOAD CHAIN</button>
-    <input type="file" id="file-input" accept=".json" onchange="handleFileSelect(event)">
+    <span id="refresh-indicator" style="font-size:0.7rem;color:var(--amber-dim)"></span>
   </div>
 </header>
 
-<!-- Drop Zone -->
-<div id="drop-zone">
-  <div class="drop-box" id="drop-box" onclick="document.getElementById('file-input').click()">
-    <span class="drop-icon">⛏</span>
-    <div class="drop-title">LOAD YOUR CHAIN FILE</div>
-    <div class="drop-sub">
-      Drop <strong>cryptocraft_chain_*.json</strong> here<br>
-      or click to browse
-    </div>
-  </div>
-  <div class="example-hint">
-    Your chain file is in the same folder as the miner executable.<br>
-    Filename looks like: <strong>cryptocraft_chain_you_example_com.json</strong>
-  </div>
-</div>
-
-<!-- Dashboard -->
+<!-- Dashboard (shown immediately, populates as data arrives) -->
 <div id="dashboard">
 
   <!-- Toolbar -->
   <div class="toolbar">
     <div class="chain-info">
-      CHAIN: <strong id="info-miner">—</strong> &nbsp;|&nbsp;
-      FILE: <strong id="info-file">—</strong> &nbsp;|&nbsp;
-      LOADED: <strong id="info-loaded">—</strong>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <span id="refresh-indicator" style="font-size:0.7rem;color:var(--amber-dim)"></span>
-      <button class="btn" onclick="pickFile()">CHANGE FILE</button>
+      MINER: <strong id="info-miner">—</strong> &nbsp;|&nbsp;
+      LAST UPDATE: <strong id="info-loaded">—</strong>
     </div>
   </div>
 
@@ -599,6 +576,10 @@
 
   <!-- Charts -->
   <div class="charts-row section-gap">
+    <div class="panel">
+      <div class="panel-title">Measured Hashrate Per Block</div>
+      <div class="chart-wrap"><canvas id="chart-hashrate"></canvas></div>
+    </div>
     <div class="panel">
       <div class="panel-title">Reward Per Block</div>
       <div class="chart-wrap"><canvas id="chart-rewards"></canvas></div>
@@ -622,8 +603,8 @@
         <input type="number" id="calc-rate" value="0.15" step="0.01" oninput="updateCalc()">
       </div>
       <div class="calc-field">
-        <label>Hashrate (H/s)</label>
-        <input type="number" id="calc-hashrate" value="5700000" oninput="updateCalc()">
+        <label>Hashrate (H/s) <span id="hr-source" style="color:var(--green);font-size:0.6rem"></span></label>
+        <input type="number" id="calc-hashrate" value="5700000" oninput="this.dataset.userEdited='1'; updateCalc()">
       </div>
     </div>
     <div class="calc-results" id="calc-results"></div>
@@ -655,139 +636,54 @@
 // ── State ────────────────────────────────────────────────────────────────────
 
 let chain           = null;
-let fileName        = '';
 let chartRewards    = null;
 let chartDifficulty = null;
-let fileHandle      = null;   // FileSystemFileHandle — enables live re-reads
+let chartHashrate   = null;
 let pollTimer       = null;
 let lastBlockCount  = 0;
-const POLL_MS       = 5000;   // re-read every 5 seconds
+const POLL_MS       = 5000;
 
-// ── File Loading ─────────────────────────────────────────────────────────────
+// ── Auto-connect ──────────────────────────────────────────────────────────────
+// Dashboard is always served by the miner's built-in HTTP server.
+// Fetches /chain immediately on load and polls every 5 seconds.
+// No file picker, no drag and drop — fully automatic.
 
-const dropBox = document.getElementById('drop-box');
-
-dropBox.addEventListener('dragover', e => { e.preventDefault(); dropBox.classList.add('dragover'); });
-dropBox.addEventListener('dragleave', () => dropBox.classList.remove('dragover'));
-dropBox.addEventListener('drop', async e => {
-  e.preventDefault();
-  dropBox.classList.remove('dragover');
-  // Try to get a FileSystemFileHandle from the drag (Chrome/Edge only)
-  if (e.dataTransfer.items && e.dataTransfer.items[0].getAsFileSystemHandle) {
-    const handle = await e.dataTransfer.items[0].getAsFileSystemHandle();
-    if (handle && handle.kind === 'file') {
-      fileHandle = handle;
-      fileName   = handle.name;
-      await readFromHandle();
-      startPolling();
-      return;
-    }
-  }
-  // Fallback — no live updates but still works
-  const file = e.dataTransfer.files[0];
-  if (file) loadFileObject(file);
-});
-
-// Main button — uses File System Access API picker for live updates
-async function pickFile() {
-  if (window.showOpenFilePicker) {
-    try {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ description: 'Chain JSON', accept: { 'application/json': ['.json'] } }],
-        multiple: false
-      });
-      fileHandle = handle;
-      fileName   = handle.name;
-      await readFromHandle();
-      startPolling();
-    } catch (err) {
-      if (err.name !== 'AbortError') showToast('ERROR: ' + err.message);
-    }
-  } else {
-    // Firefox fallback
-    document.getElementById('file-input').click();
-  }
-}
-
-// Fallback for Firefox / file input
-function handleFileSelect(e) {
-  const file = e.target.files[0];
-  if (file) loadFileObject(file);
-}
-
-// Read from a FileSystemFileHandle (enables polling)
-async function readFromHandle() {
+async function serverFetch() {
   try {
-    const file = await fileHandle.getFile();
-    const text = await file.text();
-    parseAndRender(text, true);
-  } catch (err) {
-    showToast('Read error: ' + err.message);
-  }
-}
-
-// Read from a plain File object (drag fallback / Firefox)
-function loadFileObject(file) {
-  fileName = file.name;
-  fileHandle = null;
-  stopPolling();
-  const reader = new FileReader();
-  reader.onload = e => parseAndRender(e.target.result, false);
-  reader.readAsText(file);
-}
-
-function parseAndRender(text, live) {
-  try {
-    const data = JSON.parse(text);
-    if (!data.chain || !Array.isArray(data.chain)) throw new Error('Invalid chain file');
-    const isNew    = !chain;
-    const newBlock = chain && data.chain.length > lastBlockCount;
+    const res  = await fetch('/chain?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (!data.chain) throw new Error('No chain data');
+    const initial  = !chain;
+    const newBlock = !initial && data.chain.length > lastBlockCount;
     chain          = data;
     lastBlockCount = data.chain.length;
-    renderDashboard(live);
-    if (isNew)      showToast('Chain loaded — ' + data.chain.length + ' blocks');
-    if (newBlock)   showToast('New block found! Chain is now ' + data.chain.length + ' blocks');
+    renderDashboard();
+    if (initial)  showToast('Connected — ' + data.chain.length + ' blocks');
+    if (newBlock) showToast('⛏ New block! Chain: ' + data.chain.length + ' blocks');
   } catch (err) {
-    showToast('ERROR: ' + err.message);
+    document.getElementById('status-dot').classList.add('offline');
+    document.getElementById('status-text').textContent = 'WAITING FOR MINER...';
+    const ind = document.getElementById('refresh-indicator');
+    if (ind) { ind.textContent = 'retrying every 5s'; ind.style.color = 'var(--amber-dim)'; }
   }
 }
 
-// ── Live Polling ──────────────────────────────────────────────────────────────
-
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(async () => {
-    if (fileHandle) await readFromHandle();
-  }, POLL_MS);
-  updateRefreshIndicator(true);
-}
-
-function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  updateRefreshIndicator(false);
-}
-
-function updateRefreshIndicator(live) {
-  const el = document.getElementById('refresh-indicator');
-  if (el) el.textContent = live ? '⟳ LIVE — refreshing every 5s' : '⚠ STATIC — no live updates (Firefox?)';
-  if (el) el.style.color = live ? 'var(--green)' : 'var(--amber-dim)';
-}
+window.addEventListener('DOMContentLoaded', () => {
+  serverFetch();
+  pollTimer = setInterval(serverFetch, POLL_MS);
+});
 
 // ── Render ───────────────────────────────────────────────────────────────────
 
-function renderDashboard(live) {
-  document.getElementById('drop-zone').style.display    = 'none';
-  document.getElementById('dashboard').style.display    = 'block';
-
-  const dot  = document.getElementById('status-dot');
-  const txt  = document.getElementById('status-text');
-  dot.classList.remove('offline');
-  txt.textContent = live ? 'LIVE' : 'LOADED';
-
-  document.getElementById('info-miner').textContent   = chain.miner_name || '—';
-  document.getElementById('info-file').textContent    = fileName;
-  document.getElementById('info-loaded').textContent  = new Date().toLocaleTimeString();
-  document.getElementById('header-miner').textContent = chain.miner_name || '';
+function renderDashboard() {
+  document.getElementById('status-dot').classList.remove('offline');
+  document.getElementById('status-text').textContent    = 'LIVE';
+  document.getElementById('info-miner').textContent     = chain.miner_name || '—';
+  document.getElementById('info-loaded').textContent    = new Date().toLocaleTimeString();
+  document.getElementById('header-miner').textContent   = chain.miner_name || '';
+  const ind = document.getElementById('refresh-indicator');
+  if (ind) { ind.textContent = '⟳ auto-updating every 5s'; ind.style.color = 'var(--green)'; }
 
   renderCards();
   renderChainVis();
@@ -796,44 +692,7 @@ function renderDashboard(live) {
   updateCalc();
 }
 
-function showDropZone() {
-  stopPolling();
-  fileHandle = null;
-  chain      = null;
-  document.getElementById('drop-zone').style.display    = 'flex';
-  document.getElementById('dashboard').style.display    = 'none';
-  document.getElementById('status-dot').classList.add('offline');
-  document.getElementById('status-text').textContent    = 'NO CHAIN LOADED';
-  document.getElementById('header-miner').textContent   = '';
-}
-
-// ── Cards ────────────────────────────────────────────────────────────────────
-
-function renderCards() {
-  const blocks  = chain.chain.filter(b => b.index > 0);
-  const total   = chain.total_mined || 0;
-  const diff    = chain.difficulty || 1;
-  const reward  = chain.chain.length > 0 ? currentReward() : 0;
-  const avgTime = avgBlockTime();
-  const halving = 100 - (chain.chain.length % 100);
-
-  const cards = [
-    { label: 'Total Blocks Mined', value: blocks.length, sub: chain.chain.length + ' total chain length' },
-    { label: 'CC Earned', value: total.toFixed(4), sub: 'CryptoCraft Coins', cls: 'green' },
-    { label: 'Current Difficulty', value: diff + ' zeros', sub: '#'.repeat(diff) + '.'.repeat(8-diff) },
-    { label: 'Block Reward', value: reward.toFixed(4) + ' CC', sub: 'Halving in ' + halving + ' blocks' },
-    { label: 'Avg Block Time', value: avgTime > 0 ? fmtDuration(avgTime) : '—', sub: 'across last 10 blocks' },
-    { label: 'Chain Length', value: chain.chain.length, sub: 'including genesis block' },
-  ];
-
-  document.getElementById('cards').innerHTML = cards.map(c => `
-    <div class="card">
-      <div class="card-label">${c.label}</div>
-      <div class="card-value ${c.cls||''} ${String(c.value).length > 8 ? 'small' : ''}">${c.value}</div>
-      <div class="card-sub">${c.sub}</div>
-    </div>
-  `).join('');
-}
+// ── Computed Stats ────────────────────────────────────────────────────────────
 
 function currentReward() {
   const halvings = Math.floor(chain.chain.length / 100);
@@ -841,11 +700,105 @@ function currentReward() {
 }
 
 function avgBlockTime() {
-  const minedBlocks = chain.chain.filter(b => b.index > 0);
-  if (minedBlocks.length < 2) return 0;
-  const recent = minedBlocks.slice(-Math.min(10, minedBlocks.length));
-  const elapsed = recent[recent.length-1].timestamp - recent[0].timestamp;
+  const blocks = chain.chain.filter(b => b.index > 0);
+  if (blocks.length < 2) return 0;
+  const recent  = blocks.slice(-Math.min(10, blocks.length));
+  const elapsed = recent[recent.length - 1].timestamp - recent[0].timestamp;
   return Math.round(elapsed / (recent.length - 1));
+}
+
+// Parse "Block #N mined after X attempts" from the data field
+function parseAttempts(dataStr) {
+  const m = dataStr.match(/after ([\d,]+) attempts/);
+  if (!m) return null;
+  return parseInt(m[1].replace(/,/g, ''), 10);
+}
+
+// Measured hashrate from recent blocks: attempts / block_time
+function measuredHashrate() {
+  const blocks = chain.chain.filter(b => b.index > 0);
+  if (blocks.length < 2) return null;
+
+  const recent = blocks.slice(-Math.min(5, blocks.length));
+  const samples = [];
+
+  for (let i = 1; i < recent.length; i++) {
+    const attempts = parseAttempts(recent[i].data);
+    const dt = recent[i].timestamp - recent[i - 1].timestamp;
+    if (attempts !== null && dt > 0) {
+      samples.push(attempts / dt);
+    }
+  }
+
+  if (samples.length === 0) return null;
+  return Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+}
+
+// Per-block hashrate for charting
+function hashratePerBlock() {
+  const blocks = chain.chain.filter(b => b.index > 0);
+  const result = [];
+  for (let i = 1; i < blocks.length; i++) {
+    const attempts = parseAttempts(blocks[i].data);
+    const dt = blocks[i].timestamp - blocks[i - 1].timestamp;
+    if (attempts !== null && dt > 0) {
+      result.push({ index: blocks[i].index, hr: Math.round(attempts / dt) });
+    }
+  }
+  return result;
+}
+
+function fmtHashrate(hr) {
+  if (hr >= 1_000_000) return (hr / 1_000_000).toFixed(2) + ' MH/s';
+  if (hr >= 1_000)     return (hr / 1_000).toFixed(2) + ' KH/s';
+  return hr.toFixed(0) + ' H/s';
+}
+
+// ── Cards ─────────────────────────────────────────────────────────────────────
+
+function renderCards() {
+  const blocks   = chain.chain.filter(b => b.index > 0);
+  const total    = chain.total_mined || 0;
+  const diff     = chain.difficulty || 1;
+  const reward   = chain.chain.length > 0 ? currentReward() : 0;
+  const avgTime  = avgBlockTime();
+  const halving  = 100 - (chain.chain.length % 100);
+  const hr       = measuredHashrate();
+  const hrStr    = hr ? fmtHashrate(hr) : '—';
+  const hrSub    = hr ? 'avg of last 5 blocks' : 'need 2+ blocks';
+
+  // Difficulty target label
+  const targetZeros = '0'.repeat(diff);
+  const targetRest  = 'x'.repeat(Math.max(0, 16 - diff));
+  const targetLabel = targetZeros + targetRest + '…';
+
+  const cards = [
+    { label: 'Blocks Mined',      value: blocks.length,                  sub: chain.chain.length + ' total incl. genesis' },
+    { label: 'CC Earned',         value: total.toFixed(4),               sub: 'CryptoCraft Coins', cls: 'green' },
+    { label: 'Measured Hashrate', value: hrStr,                          sub: hrSub, cls: hr ? '' : '' },
+    { label: 'Current Target',    value: diff + ' zeros',                sub: targetLabel, cls: '' },
+    { label: 'Block Reward',      value: reward.toFixed(4) + ' CC',      sub: 'Halving in ' + halving + ' blocks' },
+    { label: 'Avg Block Time',    value: avgTime > 0 ? fmtDuration(avgTime) : '—', sub: 'last 10 blocks' },
+  ];
+
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="card-label">${c.label}</div>
+      <div class="card-value ${c.cls || ''} ${String(c.value).length > 9 ? 'small' : ''}">${c.value}</div>
+      <div class="card-sub">${c.sub}</div>
+    </div>
+  `).join('');
+
+  // Auto-fill hashrate in calculator whenever we have a measurement
+  if (hr) {
+    const hrInput  = document.getElementById('calc-hashrate');
+    const hrSource = document.getElementById('hr-source');
+    if (!hrInput.dataset.userEdited) {
+      hrInput.value = hr;
+      if (hrSource) hrSource.textContent = '← measured from chain';
+      updateCalc();
+    }
+  }
 }
 
 // ── Chain Visualizer ─────────────────────────────────────────────────────────
@@ -883,14 +836,60 @@ const chartDefaults = {
   }
 };
 
+let chartHashrate = null;
+
 function renderCharts() {
   const minedBlocks = chain.chain.filter(b => b.index > 0);
   const labels      = minedBlocks.map(b => '#' + b.index);
   const rewards     = minedBlocks.map(b => b.reward);
   const diffs       = minedBlocks.map(b => b.difficulty);
 
+  // Hashrate per block
+  const hrData   = hashratePerBlock();
+  const hrLabels = hrData.map(d => '#' + d.index);
+  const hrValues = hrData.map(d => d.hr);
+
+  if (chartHashrate)   { chartHashrate.destroy(); }
   if (chartRewards)    { chartRewards.destroy(); }
   if (chartDifficulty) { chartDifficulty.destroy(); }
+
+  chartHashrate = new Chart(document.getElementById('chart-hashrate'), {
+    type: 'line',
+    data: {
+      labels: hrLabels,
+      datasets: [{
+        data: hrValues,
+        borderColor: '#ffb000',
+        backgroundColor: 'rgba(255,176,0,0.07)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#ffb000',
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      plugins: {
+        ...chartDefaults.plugins,
+        tooltip: {
+          callbacks: {
+            label: ctx => ' ' + fmtHashrate(ctx.raw)
+          }
+        }
+      },
+      scales: {
+        ...chartDefaults.scales,
+        y: {
+          ...chartDefaults.scales.y,
+          ticks: {
+            ...chartDefaults.scales.y.ticks,
+            callback: v => fmtHashrate(v)
+          }
+        }
+      }
+    }
+  });
 
   chartRewards = new Chart(document.getElementById('chart-rewards'), {
     type: 'bar',
@@ -912,11 +911,11 @@ function renderCharts() {
       labels,
       datasets: [{
         data: diffs,
-        borderColor: '#ffb000',
-        backgroundColor: 'rgba(255,176,0,0.08)',
+        borderColor: '#ff4444',
+        backgroundColor: 'rgba(255,68,68,0.07)',
         borderWidth: 2,
         pointRadius: 3,
-        pointBackgroundColor: '#ffb000',
+        pointBackgroundColor: '#ff4444',
         fill: true,
         stepped: true,
       }]
@@ -925,7 +924,12 @@ function renderCharts() {
       ...chartDefaults,
       scales: {
         ...chartDefaults.scales,
-        y: { ...chartDefaults.scales.y, min: 0, max: 9, ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 } }
+        y: {
+          ...chartDefaults.scales.y,
+          min: 0,
+          max: 9,
+          ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 }
+        }
       }
     }
   });
