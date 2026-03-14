@@ -1,95 +1,88 @@
 // ─── auth.rs ──────────────────────────────────────────────────────────────────
-// Local disk authentication with a server-ready interface.
+// SQLite-backed authentication.
 //
-// When you're ready to add a backend, implement the `AuthProvider` trait for
-// your HTTP client and swap `LocalAuthProvider` out in main.rs. The rest of
-// the codebase doesn't need to change.
-// ──────────────────────────────────────────────────────────────────────────────
+// The database lives in a single file: cryptocraft_users.db
+// It has one table:
+//
+//   CREATE TABLE users (
+//       user_id       TEXT PRIMARY KEY,   -- UUID
+//       email         TEXT UNIQUE,        -- lowercase, trimmed
+//       password_hash TEXT,               -- Argon2id hash
+//       created_at    INTEGER             -- Unix timestamp
+//   )
+//
+// Passwords are never stored in plain text — only the Argon2id hash.
+// The AuthProvider trait is unchanged so swapping to a server backend later
+// still requires zero changes in main.rs.
+// ─────────────────────────────────────────────────────────────────────────────
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use crossterm::{
-    execute,
-    style::{Color, ResetColor, SetForegroundColor},
-};
-use serde::{Deserialize, Serialize};
+use crossterm::{execute, style::{Color, ResetColor, SetForegroundColor}};
+use rusqlite::{Connection, params};
 use std::{
-    collections::HashMap,
-    fs,
     io::{self, Write},
-    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-const USERS_FILE: &str = "cryptocraft_users.json";
+const DB_FILE: &str = "cryptocraft_users.db";
 
-// ─── Session (returned on successful login) ───────────────────────────────────
+// ─── Session ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct Session {
     pub email:      String,
     pub user_id:    String,
-    pub chain_file: String,  // unique save file per user
+    pub chain_file: String,
 }
 
-// ─── AuthProvider trait (swap this for HTTP later) ───────────────────────────
+// ─── AuthProvider trait ───────────────────────────────────────────────────────
 
 pub trait AuthProvider {
-    /// Register a new user. Returns Err if email already taken.
     fn register(&mut self, email: &str, password: &str) -> Result<Session, String>;
-    /// Login an existing user. Returns Err if credentials wrong.
-    fn login(&mut self, email: &str, password: &str) -> Result<Session, String>;
+    fn login(&mut self, email: &str, password: &str)    -> Result<Session, String>;
 }
 
-// ─── Stored user record ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UserRecord {
-    user_id:       String,
-    email:         String,
-    password_hash: String,
-}
-
-// ─── Local disk implementation ────────────────────────────────────────────────
+// ─── SQLite implementation ────────────────────────────────────────────────────
 
 pub struct LocalAuthProvider {
-    users: HashMap<String, UserRecord>, // keyed by email
+    conn: Connection,
 }
 
 impl LocalAuthProvider {
+    /// Open (or create) the SQLite database and make sure the users table exists.
     pub fn load() -> Self {
-        let users = if Path::new(USERS_FILE).exists() {
-            fs::read_to_string(USERS_FILE)
-                .ok()
-                .and_then(|d| serde_json::from_str::<Vec<UserRecord>>(&d).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|u| (u.email.clone(), u))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-        LocalAuthProvider { users }
+        let conn = Connection::open(DB_FILE)
+            .expect("Failed to open SQLite database");
+
+        // CREATE TABLE IF NOT EXISTS is safe to run every launch.
+        // If the table already exists this is a no-op.
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS users (
+                user_id       TEXT PRIMARY KEY,
+                email         TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at    INTEGER NOT NULL
+            );
+        ").expect("Failed to create users table");
+
+        LocalAuthProvider { conn }
     }
 
-    fn save(&self) {
-        let records: Vec<&UserRecord> = self.users.values().collect();
-        if let Ok(json) = serde_json::to_string_pretty(&records) {
-            let _ = fs::write(USERS_FILE, json);
-        }
+    /// Returns true if at least one user exists in the database.
+    pub fn has_users(&self) -> bool {
+        let count: i64 = self.conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .unwrap_or(0);
+        count > 0
     }
 
-    pub fn has_users(&self) -> bool { !self.users.is_empty() }
-
-    fn make_session(record: &UserRecord) -> Session {
-        // Sanitise email for use as a filename
-        let safe = record.email.replace(['@', '.', '+'], "_");
-        Session {
-            email:      record.email.clone(),
-            user_id:    record.user_id.clone(),
-            chain_file: format!("cryptocraft_chain_{}.json", safe),
-        }
+    /// Turn an email into a safe filename for the chain JSON.
+    fn chain_file_for(email: &str) -> String {
+        let safe = email.replace(['@', '.', '+', ' '], "_");
+        format!("cryptocraft_chain_{}.json", safe)
     }
 }
 
@@ -97,50 +90,86 @@ impl AuthProvider for LocalAuthProvider {
     fn register(&mut self, email: &str, password: &str) -> Result<Session, String> {
         let email = email.trim().to_lowercase();
 
-        if self.users.contains_key(&email) {
-            return Err("An account with that email already exists.".to_string());
-        }
+        // ── Validate ──────────────────────────────────────────────────────────
         if email.is_empty() || !email.contains('@') {
-            return Err("Please enter a valid email address.".to_string());
+            return Err("Please enter a valid email address.".into());
         }
         if password.len() < 8 {
-            return Err("Password must be at least 8 characters.".to_string());
+            return Err("Password must be at least 8 characters.".into());
         }
 
-        let salt        = SaltString::generate(&mut OsRng);
-        let argon2      = Argon2::default();
-        let hash        = argon2
+        // ── Check for duplicate email ─────────────────────────────────────────
+        let exists: bool = self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE email = ?1",
+                params![email],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+        if exists {
+            return Err("An account with that email already exists.".into());
+        }
+
+        // ── Hash password with Argon2id ───────────────────────────────────────
+        // A unique random salt per user means identical passwords produce
+        // completely different hashes in the database.
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| e.to_string())?
             .to_string();
 
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let record  = UserRecord { user_id, email: email.clone(), password_hash: hash };
-        let session = Self::make_session(&record);
-        self.users.insert(email, record);
-        self.save();
-        Ok(session)
+        // ── INSERT into SQLite ────────────────────────────────────────────────
+        let user_id    = uuid::Uuid::new_v4().to_string();
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+
+        self.conn.execute(
+            "INSERT INTO users (user_id, email, password_hash, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![user_id, email, hash, created_at],
+        ).map_err(|e| format!("Database error: {}", e))?;
+
+        Ok(Session {
+            chain_file: Self::chain_file_for(&email),
+            email,
+            user_id,
+        })
     }
 
     fn login(&mut self, email: &str, password: &str) -> Result<Session, String> {
         let email = email.trim().to_lowercase();
 
-        let record = self.users
-            .get(&email)
-            .ok_or_else(|| "No account found with that email.".to_string())?;
+        // ── SELECT user row ───────────────────────────────────────────────────
+        // Returns Err(QueryReturnedNoRows) automatically if email not found.
+        let (user_id, stored_hash): (String, String) = self.conn
+            .query_row(
+                "SELECT user_id, password_hash FROM users WHERE email = ?1",
+                params![email],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| "No account found with that email.".to_string())?;
 
-        let parsed = PasswordHash::new(&record.password_hash)
+        // ── Verify password ───────────────────────────────────────────────────
+        let parsed = PasswordHash::new(&stored_hash)
             .map_err(|e| e.to_string())?;
 
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .map_err(|_| "Incorrect password.".to_string())?;
 
-        Ok(Self::make_session(record))
+        Ok(Session {
+            chain_file: Self::chain_file_for(&email),
+            email,
+            user_id,
+        })
     }
 }
 
-// ─── Interactive terminal login flow ─────────────────────────────────────────
+// ─── Interactive terminal login flow ──────────────────────────────────────────
+// Nothing below here is storage-related. UI is fully separate from the database.
 
 fn prompt(label: &str) -> String {
     print!("  {}: ", label);
@@ -172,8 +201,6 @@ fn print_auth_header(new_user: bool) {
     println!();
 }
 
-/// Full interactive auth flow. Returns a Session when the user is authenticated.
-/// `auth` is your AuthProvider — swap to a server implementation here later.
 pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> Session {
     loop {
         println!();
@@ -193,7 +220,6 @@ pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> S
         };
 
         match choice.trim() {
-            // ── Login ──
             "1" => {
                 print_auth_header(false);
                 let email    = prompt("Email");
@@ -215,8 +241,7 @@ pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> S
                 }
             }
 
-            // ── Register ──
-            "2" | _ => {
+            _ => {
                 print_auth_header(true);
                 let email    = prompt("Email");
                 let password = prompt_password("Password (min 8 chars)");
@@ -232,7 +257,7 @@ pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> S
                 match auth.register(&email, &password) {
                     Ok(session) => {
                         execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
-                        println!("\n  Account created! Welcome to CryptoCraft, {}!\n", session.email);
+                        println!("\n  Account created! Welcome, {}!\n", session.email);
                         execute!(io::stdout(), ResetColor).ok();
                         std::thread::sleep(std::time::Duration::from_millis(600));
                         return session;
