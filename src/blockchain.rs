@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
-pub const BLOCK_REWARD: f64               = 12;
+pub const BLOCK_REWARD: f64               = 12.0;
 pub const HALVING_INTERVAL: u64           = 100;
-pub const TARGET_BLOCK_TIME_SECS: f64     = 120;  // target 2 minutes per block
+pub const TARGET_BLOCK_TIME_SECS: f64     = 120.0;  // target 2 minutes per block
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 10;
 pub const MAX_DIFFICULTY: usize           = 16;
 pub const MIN_DIFFICULTY: usize           = 1;
