@@ -78,8 +78,9 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         let uq = user_quit.clone();
         let sm = stop_mining.clone();
         std::thread::spawn(move || {
-            let stdin = io::stdin();
-            for line in stdin.lock().lines() {
+            let stdin  = io::stdin();
+            let locked = stdin.lock();
+            for line in locked.lines() {
                 if let Ok(l) = line {
                     if l.trim().eq_ignore_ascii_case("q") {
                         sm.store(true, Ordering::SeqCst);
