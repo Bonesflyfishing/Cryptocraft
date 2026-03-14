@@ -111,7 +111,38 @@ fn main() {
                 println!("  Loading chain for {}...", miner_name);
                 std::thread::sleep(Duration::from_millis(400));
 
-                let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+                let mut blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+
+                // ── CPU benchmark on fresh chain only ─────────────────────────
+                // Only runs when chain has just the genesis block — skipped on
+                // all subsequent launches since difficulty is already calibrated.
+                if blockchain.chain.len() == 1 {
+                    clear_screen();
+                    print_banner();
+                    execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
+                    println!("  New chain detected — running CPU benchmark...");
+                    println!("  This takes 3 seconds and only happens once.");
+                    println!();
+                    execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+                    println!("  Detecting: {} logical cores", num_cpus::get());
+                    execute!(io::stdout(), ResetColor).ok();
+                    io::stdout().flush().ok();
+
+                    let (hashrate, diff) = benchmark_difficulty(3.0);
+
+                    execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+                    println!();
+                    println!("  Measured hashrate : {}", fmt_hashrate(hashrate as f64));
+                    println!("  Starting difficulty: {} leading zeros", diff);
+                    println!();
+                    execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+                    println!("  (Targeting ~{} minutes per block)", TARGET_BLOCK_TIME_SECS as u64 / 60);
+                    execute!(io::stdout(), ResetColor).ok();
+
+                    blockchain.difficulty = diff;
+                    std::thread::sleep(Duration::from_millis(1500));
+                }
+
                 println!(
                     "  Chain: {} blocks  |  Difficulty: {}  |  Earned: {:.4} CC",
                     blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
@@ -129,15 +160,30 @@ fn main() {
                 clear_screen();
 
                 run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip);
-                // returns here when user presses Ctrl+C — loop continues to menu
             }
 
             // ── Pool server ───────────────────────────────────────────────────
             2 => {
                 println!("  Loading chain for pool server...");
                 std::thread::sleep(Duration::from_millis(400));
-                let blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
+                let mut blockchain = Blockchain::load_or_new(&miner_name, &session.chain_file);
                 clear_screen();
+
+                // Benchmark on fresh chain only
+                if blockchain.chain.len() == 1 {
+                    print_banner();
+                    execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
+                    println!("  New chain — running CPU benchmark (3s)...");
+                    execute!(io::stdout(), ResetColor).ok();
+                    let (hashrate, diff) = benchmark_difficulty(3.0);
+                    execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+                    println!("  Hashrate: {}  →  Starting difficulty: {} zeros",
+                        fmt_hashrate(hashrate as f64), diff);
+                    execute!(io::stdout(), ResetColor).ok();
+                    blockchain.difficulty = diff;
+                    std::thread::sleep(Duration::from_millis(1200));
+                    clear_screen();
+                }
 
                 let (bind_ip, display_ip) = network::pick_host_interface();
                 clear_screen();
@@ -150,7 +196,6 @@ fn main() {
                 clear_screen();
 
                 pool_server::run(blockchain, session.chain_file.clone(), bind_ip);
-                // returns here when user presses Ctrl+C — loop continues to menu
             }
 
             // ── Pool client ───────────────────────────────────────────────────
