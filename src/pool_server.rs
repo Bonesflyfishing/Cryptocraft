@@ -106,8 +106,9 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
     {
         let q = quit.clone();
         std::thread::spawn(move || {
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines() {
+            let stdin  = std::io::stdin();
+            let locked = stdin.lock();
+            for line in locked.lines() {
                 if let Ok(l) = line {
                     if l.trim().eq_ignore_ascii_case("q") {
                         q.store(true, Ordering::SeqCst);
