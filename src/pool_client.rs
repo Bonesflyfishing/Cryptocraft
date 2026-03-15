@@ -308,7 +308,6 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         println!("  CC Earned  : {:.4} CC", st.total_cc);
     }
     println!();
-}
 
 // ── Mining core ───────────────────────────────────────────────────────────────
 
