@@ -308,14 +308,14 @@ function renderSolo() {
   const bc     = soloChain;
   const blocks = bc.chain.filter(b => b.index > 0);
   const avgT   = avgBlockTime(blocks);
-  const hr     = measuredHr(blocks);
+  const hr     = measuredHr(blocks) || bc.live_hashrate || null;
   const reward = currentReward(bc.chain.length);
   const halvIn = 100 - (bc.chain.length % 100);
 
   setCards('solo-cards', [
     { label:'Blocks Mined',    value: blocks.length,                      sub: bc.chain.length + ' total incl. genesis' },
     { label:'CC Earned',       value: (bc.total_mined||0).toFixed(4),     sub: 'CryptoCraft Coins', cls:'green' },
-    { label:'Hashrate',        value: hr ? fmtHr(hr) : '—',              sub: 'avg last 5 blocks' },
+    { label:'Hashrate',        value: hr ? fmtHr(hr) : '—',              sub: hr && blocks.length < 2 ? 'live from miner' : 'avg last 5 blocks' },
     { label:'Difficulty',      value: bc.difficulty + ' zeros',           sub: zeroPreview(bc.difficulty) },
     { label:'Block Reward',    value: reward.toFixed(4) + ' CC',          sub: 'Halving in ' + halvIn + ' blocks' },
     { label:'Avg Block Time',  value: avgT > 0 ? fmtDur(avgT) : '—',     sub: 'last 10 blocks' },
