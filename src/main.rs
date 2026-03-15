@@ -9,7 +9,12 @@ mod wallet;
 
 use auth::run_auth_flow;
 use blockchain::*;
-use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor, Stylize}, terminal::{self, ClearType}};
+use crossterm::{
+    cursor, execute,
+    event::{self, Event, KeyCode, KeyEventKind},
+    style::{Color, ResetColor, SetForegroundColor},
+    terminal::{self, ClearType},
+};
 use rand::Rng;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -252,23 +257,6 @@ fn run_solo_miner(
     let hash_counter = Arc::new(AtomicU64::new(0));
     let peek_hash    = Arc::new(Mutex::new("0".repeat(16)));
 
-    // Spawn a stdin reader thread — type Q + Enter to return to menu
-    {
-        let uq = user_quit.clone();
-        std::thread::spawn(move || {
-            let stdin = io::stdin();
-            let locked = stdin.lock();
-            for line in locked.lines() {
-                if let Ok(l) = line {
-                    if l.trim().eq_ignore_ascii_case("q") {
-                        uq.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
     let mut ui           = Ui::new();
     let mut blocks_found = 0u64;
     let mut flavor       = random_flavor();
@@ -298,6 +286,9 @@ fn run_solo_miner(
 
         let handle = std::thread::spawn(move || mine_parallel(&tmp, difficulty, ms, hc, ph));
 
+        // Enable raw mode so we can read keypresses without Enter
+        let _ = terminal::enable_raw_mode();
+
         loop {
             if flavor_t.elapsed() > Duration::from_secs(4) {
                 flavor   = random_flavor();
@@ -314,13 +305,31 @@ fn run_solo_miner(
                 last_hr_push = Instant::now();
             }
 
+            // Poll for Q keypress — non-blocking, 100ms timeout
+            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.kind == KeyEventKind::Press {
+                        if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
+                            let _ = terminal::disable_raw_mode();
+                            user_quit.store(true, Ordering::SeqCst);
+                            mine_stop.store(true, Ordering::SeqCst);
+                            let _ = handle.join();
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+
             if user_quit.load(Ordering::Relaxed) {
+                let _ = terminal::disable_raw_mode();
                 mine_stop.store(true, Ordering::SeqCst);
                 let _ = handle.join();
                 break 'outer;
             }
-            if handle.is_finished() { break; }
-            std::thread::sleep(Duration::from_millis(120));
+            if handle.is_finished() {
+                let _ = terminal::disable_raw_mode();
+                break;
+            }
         }
 
         if user_quit.load(Ordering::Relaxed) { break; }
