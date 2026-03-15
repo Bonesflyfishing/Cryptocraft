@@ -105,9 +105,17 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     if let Ok(mut st) = shared_stats.lock() { st.connected = true; st.status = "Waiting for work...".into(); }
 
     // ── HTTP dashboard server ─────────────────────────────────────────────────
+    // Serves the dashboard and proxies /pool_stats from the pool server so
+    // the dashboard sees all miners, not just this client.
     {
-        let ss   = shared_stats.clone();
-        let html = include_str!("../dashboard.html").to_string();
+        let ss          = shared_stats.clone();
+        let html        = include_str!("../dashboard.html").to_string();
+        // server_addr is "192.168.x.x:8080" — swap port to 2700 for HTTP
+        let pool_dashboard_addr = server_addr
+            .split(':').next()
+            .map(|ip| format!("{}:2700", ip))
+            .unwrap_or_else(|| server_addr.clone());
+
         std::thread::spawn(move || {
             let addr   = format!("0.0.0.0:{}", DASHBOARD_PORT);
             let server = match Server::http(&addr) {
@@ -115,6 +123,7 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                 Err(e) => { eprintln!("[client dashboard] bind error: {}", e); return; }
             };
             let html_bytes = Arc::new(html.into_bytes());
+
             for req in server.incoming_requests() {
                 let path = req.url().split('?').next().unwrap_or("/").to_string();
                 match path.as_str() {
@@ -124,15 +133,31 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                             .with_header(ct("text/html; charset=utf-8"))
                             .with_header(no_cache()));
                     }
-                    "/client_stats" => {
-                        let json = if let Ok(st) = ss.lock() {
-                            serde_json::to_string(&*st).unwrap_or_else(|_| "{}".into())
-                        } else { "{}".into() };
+
+                    // Proxy /pool_stats from the pool server
+                    "/pool_stats" => {
+                        let pool_url = format!("http://{}/pool_stats", pool_dashboard_addr);
+                        let json = fetch_url(&pool_url)
+                            .unwrap_or_else(|| r#"{"error":"pool server unreachable"}"#.into());
                         let _ = req.respond(Response::from_data(json.into_bytes())
                             .with_header(ct("application/json"))
                             .with_header(cors())
                             .with_header(no_cache()));
                     }
+
+                    "/status" => {
+                        // Include this client's own stats alongside the mode
+                        let connected = ss.lock()
+                            .map(|s| s.connected).unwrap_or(false);
+                        let body = format!(
+                            r#"{{"mode":"pool_client","connected":{}}}"#,
+                            connected
+                        );
+                        let _ = req.respond(Response::from_data(body.into_bytes())
+                            .with_header(ct("application/json"))
+                            .with_header(cors()));
+                    }
+
                     _ => { let _ = req.respond(Response::from_data(b"404".to_vec()).with_status_code(404)); }
                 }
             }
@@ -445,6 +470,35 @@ impl ClientTermUi {
 fn ct(s: &str) -> Header { Header::from_bytes("Content-Type", s).unwrap() }
 fn cors()      -> Header { Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap() }
 fn no_cache()  -> Header { Header::from_bytes("Cache-Control", "no-cache, no-store").unwrap() }
+
+/// Simple blocking HTTP GET — used to proxy /pool_stats from the pool server.
+/// Returns the response body as a String, or None on failure.
+fn fetch_url(url: &str) -> Option<String> {
+    // Parse host and path from URL
+    let without_scheme = url.strip_prefix("http://")?;
+    let (host, path)   = if let Some(pos) = without_scheme.find('/') {
+        (&without_scheme[..pos], &without_scheme[pos..])
+    } else {
+        (without_scheme, "/")
+    };
+
+    let mut stream = TcpStream::connect(host).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+
+    let mut response = String::new();
+    use std::io::Read;
+    stream.read_to_string(&mut response).ok()?;
+
+    // Strip HTTP headers — body starts after \r\n\r\n
+    response.find("\r\n\r\n")
+        .map(|pos| response[pos + 4..].to_string())
+}
 
 // ── Misc helpers ─────────────────────────────────────────────────────────────
 
