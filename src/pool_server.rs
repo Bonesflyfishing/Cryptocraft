@@ -7,6 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 use crate::blockchain::Blockchain;
+use crate::db::{self, Db};
 use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -104,6 +105,7 @@ pub struct PoolState {
     pub miners:       HashMap<String, MinerConn>,
     pub blocks_total: u64,
     pub bind_ip:      String,
+    pub db:           Db,
 }
 
 impl PoolState {
@@ -159,7 +161,7 @@ impl PoolState {
 
 // ── Server entry point ────────────────────────────────────────────────────────
 
-pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
+pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String, db: Db) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let quit = Arc::new(AtomicBool::new(false));
@@ -187,6 +189,7 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String) {
         miners: HashMap::new(),
         blocks_total: 0,
         bind_ip: bind_ip.clone(),
+        db,
     }));
 
     // ── HTTP dashboard server on port 2700 ────────────────────────────────────
@@ -309,10 +312,10 @@ fn handle_client(stream: TcpStream, state: Arc<Mutex<PoolState>>) {
         let msg: ClientMsg = match serde_json::from_str(&line) { Ok(m) => m, Err(_) => continue };
 
         match msg {
-            ClientMsg::Hello { email: _, name } => {
+            ClientMsg::Hello { email: e, name } => {
                 authed = true;
                 let conn = MinerConn {
-                    email:        String::new(),
+                    email:        e,
                     name,
                     hashrate:     0,
                     blocks_found: 0,
@@ -345,6 +348,26 @@ fn handle_client(stream: TcpStream, state: Arc<Mutex<PoolState>>) {
                 st.blocks_total += 1;
                 if let Some(conn) = st.miners.get_mut(&addr) { conn.blocks_found += 1; }
 
+                // ── Proportional reward distribution ──────────────────────────
+                // Build list of (user_id, hashrate) for every connected miner
+                // that has a known email. Look up their user_id from the db.
+                let reward      = block.reward;
+                let block_index = block.index;
+                let db_ref      = st.db.clone();
+                let miner_hrs: Vec<(String, u64)> = st.miners.values()
+                    .filter(|m| !m.email.is_empty() && m.hashrate > 0)
+                    .filter_map(|m| {
+                        db::user_id_for_email(&db_ref, &m.email)
+                            .map(|uid| (uid, m.hashrate))
+                    })
+                    .collect();
+
+                // Distribute in a separate thread so we don't hold the lock
+                // while doing DB writes
+                std::thread::spawn(move || {
+                    db::distribute_reward(&db_ref, &miner_hrs, reward, block_index);
+                });
+
                 let accept = ServerMsg::Accepted { block_index: block.index, reward: block.reward };
                 if let Ok(mut w) = writer.lock() { let _ = w.write_all((serde_json::to_string(&accept).unwrap()+"\n").as_bytes()); }
 
@@ -363,7 +386,7 @@ fn handle_client(stream: TcpStream, state: Arc<Mutex<PoolState>>) {
             }
 
             ClientMsg::Bye => break,
-            }
+        }
     }
 
     if let Ok(mut st) = state.lock() { st.miners.remove(&addr); }
