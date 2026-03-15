@@ -19,14 +19,20 @@ pub const PORT: u16 = 2700;
 
 #[derive(Clone)]
 pub struct ServerState {
-    pub chain_file: Arc<Mutex<String>>,
+    pub chain_file:     Arc<Mutex<String>>,
+    pub live_hashrate:  Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ServerState {
     pub fn new(chain_file: &str) -> Self {
         ServerState {
-            chain_file: Arc::new(Mutex::new(chain_file.to_string())),
+            chain_file:    Arc::new(Mutex::new(chain_file.to_string())),
+            live_hashrate: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    pub fn set_hashrate(&self, hr: u64) {
+        self.live_hashrate.store(hr, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn update_chain_file(&self, path: &str) {
@@ -64,8 +70,15 @@ pub fn spawn(state: ServerState, dashboard_html: String) {
                 "/chain" => {
                     let file_path = state.chain_file.lock()
                         .map(|f| f.clone()).unwrap_or_default();
-                    let body = fs::read_to_string(&file_path)
+                    let hr = state.live_hashrate.load(std::sync::atomic::Ordering::Relaxed);
+                    let mut body = fs::read_to_string(&file_path)
                         .unwrap_or_else(|_| r#"{"error":"chain file not found"}"#.to_string());
+                    // Inject live_hashrate into the JSON before the closing brace
+                    if body.trim_end().ends_with('}') {
+                        let insert = format!(r#","live_hashrate":{}"#, hr);
+                        let pos = body.trim_end().len() - 1;
+                        body.insert_str(pos, &insert);
+                    }
                     let _ = request.respond(Response::from_data(body.into_bytes())
                         .with_header(content_type("application/json"))
                         .with_header(cors())
