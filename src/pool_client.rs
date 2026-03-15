@@ -229,6 +229,7 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         };
 
         match msg {
+            ServerMsg::Work { index, prev_hash, difficulty, timestamp, data, reward: _ } => {
                 external_stop.store(false, Ordering::SeqCst);
                 stop_mining.store(true, Ordering::SeqCst);
                 if let Some(h) = current_handle.take() { let _ = h.join(); }
@@ -308,6 +309,7 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         println!("  CC Earned  : {:.4} CC", st.total_cc);
     }
     println!();
+}
 
 // ── Mining core ───────────────────────────────────────────────────────────────
 
