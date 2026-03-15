@@ -3,541 +3,124 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CryptoCraft — Chain Explorer</title>
+<title>CryptoCraft Dashboard</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
-  :root {
-    --amber: #ffb000;
-    --amber-dim: #b37800;
-    --amber-faint: #3d2800;
-    --amber-glow: rgba(255,176,0,0.15);
-    --amber-glow-strong: rgba(255,176,0,0.35);
-    --green: #00ff88;
-    --red: #ff4444;
-    --bg: #0a0700;
-    --bg2: #0f0b00;
-    --bg3: #161000;
-    --border: rgba(255,176,0,0.25);
-    --border-bright: rgba(255,176,0,0.6);
-    --font-mono: 'Share Tech Mono', monospace;
-    --font-display: 'Orbitron', monospace;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    background: var(--bg);
-    color: var(--amber);
-    font-family: var(--font-mono);
-    min-height: 100vh;
-    overflow-x: hidden;
-    cursor: crosshair;
-  }
-
-  /* CRT scanline overlay */
-  body::before {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 2px,
-      rgba(0,0,0,0.08) 2px,
-      rgba(0,0,0,0.08) 4px
-    );
-    pointer-events: none;
-    z-index: 9999;
-  }
-
-  /* CRT vignette */
-  body::after {
-    content: '';
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%);
-    pointer-events: none;
-    z-index: 9998;
-  }
-
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { background: var(--bg); }
-  ::-webkit-scrollbar-thumb { background: var(--amber-dim); }
-
-  /* ── Header ── */
-  header {
-    border-bottom: 1px solid var(--border-bright);
-    padding: 20px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: var(--bg2);
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    box-shadow: 0 0 40px rgba(255,176,0,0.1);
-  }
-
-  .logo {
-    font-family: var(--font-display);
-    font-size: 1.4rem;
-    font-weight: 900;
-    letter-spacing: 0.15em;
-    text-shadow: 0 0 20px var(--amber), 0 0 40px rgba(255,176,0,0.4);
-    animation: flicker 8s infinite;
-  }
-
-  .logo span { color: var(--amber-dim); font-weight: 400; }
-
-  @keyframes flicker {
-    0%,96%,98%,100% { opacity: 1; }
-    97%,99% { opacity: 0.85; }
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    font-size: 0.75rem;
-    color: var(--amber-dim);
-  }
-
-  .status-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 8px var(--green);
-    animation: pulse 2s infinite;
-    display: inline-block;
-    margin-right: 6px;
-  }
-
-  .status-dot.offline { background: var(--red); box-shadow: 0 0 8px var(--red); animation: none; }
-
-  @keyframes pulse {
-    0%,100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  /* ── Drop Zone ── */
-  #drop-zone {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: calc(100vh - 73px);
-    gap: 24px;
-    padding: 40px;
-    animation: fadeIn 0.5s ease;
-  }
-
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-
-  .drop-box {
-    border: 2px dashed var(--border-bright);
-    padding: 60px 80px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.2s;
-    background: var(--bg2);
-    position: relative;
-    overflow: hidden;
-  }
-
-  .drop-box::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: var(--amber-glow);
-    opacity: 0;
-    transition: opacity 0.2s;
-  }
-
-  .drop-box:hover::before, .drop-box.dragover::before { opacity: 1; }
-  .drop-box:hover, .drop-box.dragover {
-    border-color: var(--amber);
-    box-shadow: 0 0 30px var(--amber-glow-strong), inset 0 0 30px var(--amber-glow);
-  }
-
-  .drop-icon {
-    font-size: 3rem;
-    margin-bottom: 16px;
-    display: block;
-    text-shadow: 0 0 20px var(--amber);
-  }
-
-  .drop-title {
-    font-family: var(--font-display);
-    font-size: 1.1rem;
-    letter-spacing: 0.1em;
-    margin-bottom: 8px;
-  }
-
-  .drop-sub { color: var(--amber-dim); font-size: 0.8rem; line-height: 1.6; }
-
-  .btn {
-    background: transparent;
-    border: 1px solid var(--amber);
-    color: var(--amber);
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    padding: 10px 28px;
-    cursor: pointer;
-    letter-spacing: 0.1em;
-    transition: all 0.15s;
-    text-transform: uppercase;
-  }
-
-  .btn:hover {
-    background: var(--amber-glow-strong);
-    box-shadow: 0 0 20px var(--amber-glow-strong);
-    text-shadow: 0 0 10px var(--amber);
-  }
-
-  .example-hint {
-    color: var(--amber-dim);
-    font-size: 0.75rem;
-    text-align: center;
-    line-height: 1.8;
-  }
-
-  /* ── Dashboard ── */
-  #dashboard {
-    display: block;
-    padding: 28px 32px;
-    animation: fadeIn 0.4s ease;
-  }
-
-  .toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-
-  .chain-info {
-    font-size: 0.75rem;
-    color: var(--amber-dim);
-  }
-
-  .chain-info strong { color: var(--amber); }
-
-  /* ── Stat Cards ── */
-  .cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 16px;
-    margin-bottom: 28px;
-  }
-
-  .card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    padding: 20px;
-    position: relative;
-    overflow: hidden;
-    transition: border-color 0.2s;
-  }
-
-  .card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--amber);
-    box-shadow: 0 0 10px var(--amber);
-  }
-
-  .card:hover { border-color: var(--amber); }
-
-  .card-label {
-    font-size: 0.65rem;
-    color: var(--amber-dim);
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    margin-bottom: 10px;
-  }
-
-  .card-value {
-    font-family: var(--font-display);
-    font-size: 1.6rem;
-    font-weight: 700;
-    line-height: 1;
-    text-shadow: 0 0 15px rgba(255,176,0,0.5);
-  }
-
-  .card-value.green { color: var(--green); text-shadow: 0 0 15px rgba(0,255,136,0.4); }
-  .card-value.small { font-size: 1rem; }
-  .card-sub { font-size: 0.7rem; color: var(--amber-dim); margin-top: 6px; }
-
-  /* ── Charts row ── */
-  .charts-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 28px;
-  }
-
-  @media (max-width: 900px) { .charts-row { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 600px) { .charts-row { grid-template-columns: 1fr; } }
-
-  .panel {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    padding: 20px;
-  }
-
-  .panel-title {
-    font-family: var(--font-display);
-    font-size: 0.7rem;
-    letter-spacing: 0.2em;
-    color: var(--amber-dim);
-    margin-bottom: 16px;
-    text-transform: uppercase;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .panel-title::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: var(--border);
-  }
-
-  .chart-wrap { position: relative; height: 180px; }
-
-  /* ── Power Calculator ── */
-  .calc-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-
-  @media (max-width: 600px) { .calc-grid { grid-template-columns: 1fr; } }
-
-  .calc-field label {
-    display: block;
-    font-size: 0.65rem;
-    color: var(--amber-dim);
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    margin-bottom: 6px;
-  }
-
-  .calc-field input {
-    width: 100%;
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    color: var(--amber);
-    font-family: var(--font-mono);
-    font-size: 0.9rem;
-    padding: 8px 12px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .calc-field input:focus { border-color: var(--amber); box-shadow: 0 0 10px var(--amber-glow); }
-
-  .calc-results {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-    gap: 10px;
-  }
-
-  .calc-result {
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    padding: 12px 16px;
-  }
-
-  .calc-result-label { font-size: 0.65rem; color: var(--amber-dim); margin-bottom: 4px; letter-spacing: 0.1em; }
-  .calc-result-val { font-family: var(--font-display); font-size: 0.95rem; }
-  .calc-result-val.green { color: var(--green); }
-
-  /* ── Block Explorer ── */
-  .block-list { display: flex; flex-direction: column; gap: 4px; max-height: 480px; overflow-y: auto; }
-
-  .block-row {
-    display: grid;
-    grid-template-columns: 60px 1fr 90px 80px 90px;
-    gap: 12px;
-    align-items: center;
-    padding: 10px 14px;
-    background: var(--bg3);
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: all 0.15s;
-    font-size: 0.78rem;
-  }
-
-  .block-row:hover {
-    border-color: var(--amber);
-    background: var(--amber-faint);
-    box-shadow: inset 0 0 20px var(--amber-glow);
-  }
-
-  .block-row.genesis { color: var(--amber-dim); }
-  .block-row.header {
-    color: var(--amber-dim);
-    font-size: 0.65rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    cursor: default;
-    background: var(--bg2);
-    border-color: var(--border);
-  }
-
-  .block-row.header:hover { border-color: var(--border); background: var(--bg2); box-shadow: none; }
-
-  .block-index { font-family: var(--font-display); font-size: 0.8rem; }
-  .block-hash { font-size: 0.72rem; color: var(--amber-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .block-hash .zeros { color: var(--amber); }
-  .block-zeros { text-align: center; }
-  .block-reward { color: var(--green); text-align: right; }
-  .block-time { color: var(--amber-dim); font-size: 0.7rem; text-align: right; }
-
-  /* ── Block Detail Modal ── */
-  #modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.8);
-    z-index: 1000;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-  }
-
-  #modal-overlay.open { display: flex; }
-
-  .modal {
-    background: var(--bg2);
-    border: 1px solid var(--amber);
-    box-shadow: 0 0 60px rgba(255,176,0,0.3);
-    padding: 28px;
-    max-width: 600px;
-    width: 100%;
-    max-height: 80vh;
-    overflow-y: auto;
-    animation: fadeIn 0.2s ease;
-  }
-
-  .modal-title {
-    font-family: var(--font-display);
-    font-size: 0.9rem;
-    letter-spacing: 0.15em;
-    margin-bottom: 20px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .modal-close {
-    background: none;
-    border: none;
-    color: var(--amber-dim);
-    cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 1rem;
-    transition: color 0.15s;
-  }
-
-  .modal-close:hover { color: var(--amber); }
-
-  .modal-field { margin-bottom: 14px; }
-  .modal-field-label { font-size: 0.65rem; color: var(--amber-dim); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 4px; }
-  .modal-field-val { font-size: 0.82rem; word-break: break-all; line-height: 1.5; }
-  .modal-field-val .zeros { color: var(--green); text-shadow: 0 0 8px rgba(0,255,136,0.4); }
-
-  /* ── Chain Visualizer ── */
-  .chain-vis {
-    display: flex;
-    gap: 0;
-    overflow-x: auto;
-    padding: 8px 0 16px;
-    align-items: center;
-  }
-
-  .chain-vis::-webkit-scrollbar { height: 4px; }
-
-  .chain-block {
-    flex-shrink: 0;
-    width: 52px;
-    height: 52px;
-    border: 1px solid var(--border);
-    background: var(--bg3);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: var(--font-display);
-    font-size: 0.6rem;
-    cursor: pointer;
-    transition: all 0.15s;
-    position: relative;
-  }
-
-  .chain-block:hover {
-    border-color: var(--amber);
-    background: var(--amber-faint);
-    box-shadow: 0 0 15px var(--amber-glow-strong);
-    z-index: 1;
-  }
-
-  .chain-link {
-    flex-shrink: 0;
-    width: 16px;
-    height: 2px;
-    background: var(--amber-dim);
-  }
-
-  .chain-block.genesis { border-color: var(--amber-dim); color: var(--amber-dim); }
-  .chain-block.d1 { border-color: #3a3a00; }
-  .chain-block.d2 { border-color: #4a4000; }
-  .chain-block.d3 { border-color: #5a5000; }
-  .chain-block.d4 { border-color: #7a6500; }
-  .chain-block.d5 { border-color: #9a8000; }
-  .chain-block.d6 { border-color: #ba9b00; }
-  .chain-block.d7 { border-color: var(--amber); box-shadow: 0 0 8px var(--amber-glow); }
-  .chain-block.d8 { border-color: var(--amber); box-shadow: 0 0 12px var(--amber-glow-strong); background: var(--amber-faint); }
-
-  /* ── Toast ── */
-  #toast {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    background: var(--bg2);
-    border: 1px solid var(--amber);
-    color: var(--amber);
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    padding: 12px 20px;
-    z-index: 2000;
-    box-shadow: 0 0 20px var(--amber-glow-strong);
-    opacity: 0;
-    transform: translateY(10px);
-    transition: all 0.2s;
-    pointer-events: none;
-  }
-
-  #toast.show { opacity: 1; transform: none; }
-
-  /* ── Misc ── */
-  .section-gap { margin-bottom: 28px; }
-  .text-dim { color: var(--amber-dim); }
-  .text-green { color: var(--green); }
-  .mono { font-family: var(--font-mono); }
-
-  .blink { animation: blink 1s step-end infinite; }
-  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+:root {
+  --amber: #ffb000;
+  --amber-dim: #b37800;
+  --amber-faint: #3d2800;
+  --amber-glow: rgba(255,176,0,0.15);
+  --amber-glow-strong: rgba(255,176,0,0.35);
+  --green: #00ff88;
+  --red: #ff4444;
+  --blue: #00aaff;
+  --bg: #0a0700;
+  --bg2: #0f0b00;
+  --bg3: #161000;
+  --border: rgba(255,176,0,0.25);
+  --border-bright: rgba(255,176,0,0.6);
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-display: 'Orbitron', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--amber); font-family: var(--font-mono); min-height: 100vh; overflow-x: hidden; cursor: crosshair; }
+body::before { content: ''; position: fixed; inset: 0; background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px); pointer-events: none; z-index: 9999; }
+body::after  { content: ''; position: fixed; inset: 0; background: radial-gradient(ellipse at center, transparent 60%, rgba(0,0,0,0.7) 100%); pointer-events: none; z-index: 9998; }
+::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: var(--bg); } ::-webkit-scrollbar-thumb { background: var(--amber-dim); }
+
+/* ── Header ── */
+header { border-bottom: 1px solid var(--border-bright); padding: 16px 28px; display: flex; align-items: center; justify-content: space-between; background: var(--bg2); position: sticky; top: 0; z-index: 100; box-shadow: 0 0 40px rgba(255,176,0,0.1); }
+.logo { font-family: var(--font-display); font-size: 1.3rem; font-weight: 900; letter-spacing: 0.15em; text-shadow: 0 0 20px var(--amber); animation: flicker 8s infinite; }
+.logo span { color: var(--amber-dim); font-weight: 400; }
+@keyframes flicker { 0%,96%,98%,100%{opacity:1} 97%,99%{opacity:0.85} }
+.header-right { display: flex; align-items: center; gap: 16px; font-size: 0.75rem; }
+.mode-badge { font-family: var(--font-display); font-size: 0.6rem; letter-spacing: 0.15em; padding: 4px 10px; border: 1px solid; }
+.mode-badge.solo   { border-color: var(--amber); color: var(--amber); }
+.mode-badge.server { border-color: var(--green);  color: var(--green); }
+.mode-badge.client { border-color: var(--blue);   color: var(--blue); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+.status-dot.live    { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+.status-dot.offline { background: var(--red);   box-shadow: 0 0 8px var(--red); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* ── Layout ── */
+.page { padding: 24px 28px; animation: fadeIn 0.4s ease; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+
+/* ── Stat Cards ── */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; margin-bottom: 24px; }
+.card { background: var(--bg2); border: 1px solid var(--border); padding: 18px; position: relative; overflow: hidden; transition: border-color 0.2s; }
+.card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+.card:hover { border-color: var(--amber); }
+.card-label { font-size: 0.62rem; color: var(--amber-dim); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 8px; }
+.card-value { font-family: var(--font-display); font-size: 1.4rem; font-weight: 700; line-height: 1; text-shadow: 0 0 15px rgba(255,176,0,0.5); }
+.card-value.green { color: var(--green); text-shadow: 0 0 12px rgba(0,255,136,0.4); }
+.card-value.blue  { color: var(--blue);  text-shadow: 0 0 12px rgba(0,170,255,0.4); }
+.card-value.sm    { font-size: 0.95rem; }
+.card-sub { font-size: 0.65rem; color: var(--amber-dim); margin-top: 5px; }
+
+/* ── Panels ── */
+.panel { background: var(--bg2); border: 1px solid var(--border); padding: 18px; margin-bottom: 18px; }
+.panel-title { font-family: var(--font-display); font-size: 0.65rem; letter-spacing: 0.2em; color: var(--amber-dim); margin-bottom: 14px; text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+.panel-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* ── Charts ── */
+.charts-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.chart-wrap { position: relative; height: 170px; }
+
+/* ── Pool Miners Table ── */
+.miner-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.miner-table th { font-size: 0.6rem; color: var(--amber-dim); letter-spacing: 0.12em; text-transform: uppercase; padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+.miner-table td { padding: 9px 10px; border-bottom: 1px solid rgba(255,176,0,0.08); }
+.miner-table tr:hover td { background: var(--amber-faint); }
+.miner-table td.green { color: var(--green); }
+.miner-table td.blue  { color: var(--blue); }
+
+/* ── Contribution bar ── */
+.contrib-bar { height: 8px; background: var(--bg3); border: 1px solid var(--border); margin-top: 4px; }
+.contrib-fill { height: 100%; background: var(--green); transition: width 0.4s ease; }
+
+/* ── Block List ── */
+.block-list { display: flex; flex-direction: column; gap: 3px; max-height: 380px; overflow-y: auto; }
+.block-row { display: grid; grid-template-columns: 55px 1fr 80px 75px 95px; gap: 10px; align-items: center; padding: 8px 12px; background: var(--bg3); border: 1px solid transparent; cursor: pointer; transition: all 0.15s; font-size: 0.75rem; }
+.block-row:hover { border-color: var(--amber); background: var(--amber-faint); }
+.block-row.hdr { color: var(--amber-dim); font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; cursor: default; background: var(--bg2); border-color: var(--border); }
+.block-row.hdr:hover { border-color: var(--border); background: var(--bg2); }
+.block-hash { font-size: 0.7rem; color: var(--amber-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block-hash .z { color: var(--amber); }
+.block-miner { color: var(--blue); }
+
+/* ── Chain vis ── */
+.chain-vis { display: flex; overflow-x: auto; padding: 6px 0 12px; align-items: center; }
+.chain-vis::-webkit-scrollbar { height: 4px; }
+.cv-block { flex-shrink:0; width:46px; height:46px; border:1px solid var(--border); background:var(--bg3); display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-size:0.55rem; cursor:pointer; transition:all 0.15s; }
+.cv-block:hover { border-color:var(--amber); box-shadow:0 0 12px var(--amber-glow-strong); }
+.cv-link { flex-shrink:0; width:14px; height:2px; background:var(--amber-dim); }
+.cv-block.d7,.cv-block.d8 { border-color:var(--amber); }
+.cv-block.d8 { box-shadow:0 0 10px var(--amber-glow); }
+
+/* ── Modal ── */
+#modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:1000; align-items:center; justify-content:center; padding:20px; }
+#modal-overlay.open { display:flex; }
+.modal { background:var(--bg2); border:1px solid var(--amber); box-shadow:0 0 60px rgba(255,176,0,0.3); padding:24px; max-width:580px; width:100%; max-height:80vh; overflow-y:auto; animation:fadeIn 0.2s ease; }
+.modal-title { font-family:var(--font-display); font-size:0.85rem; letter-spacing:0.15em; margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+.modal-close { background:none; border:none; color:var(--amber-dim); cursor:pointer; font-family:var(--font-mono); font-size:0.9rem; }
+.modal-close:hover { color:var(--amber); }
+.mf { margin-bottom:12px; }
+.mf-label { font-size:0.6rem; color:var(--amber-dim); letter-spacing:0.15em; text-transform:uppercase; margin-bottom:3px; }
+.mf-val { font-size:0.8rem; word-break:break-all; line-height:1.4; }
+.mf-val .z { color:var(--green); text-shadow:0 0 6px rgba(0,255,136,0.4); }
+
+/* ── Toast ── */
+#toast { position:fixed; bottom:20px; right:20px; background:var(--bg2); border:1px solid var(--amber); color:var(--amber); font-family:var(--font-mono); font-size:0.78rem; padding:10px 18px; z-index:2000; box-shadow:0 0 20px var(--amber-glow-strong); opacity:0; transform:translateY(8px); transition:all 0.2s; pointer-events:none; }
+#toast.show { opacity:1; transform:none; }
+
+/* ── Connecting screen ── */
+#connecting { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:calc(100vh - 60px); gap:16px; }
+.connecting-icon { font-size:3rem; animation:pulse 1.5s infinite; }
+.connecting-text { font-family:var(--font-display); font-size:0.9rem; letter-spacing:0.2em; color:var(--amber-dim); }
 </style>
 </head>
 <body>
@@ -545,82 +128,84 @@
 <header>
   <div class="logo">CRYPTO<span>CRAFT</span> ⛏</div>
   <div class="header-right">
-    <span id="status-indicator"><span class="status-dot offline" id="status-dot"></span><span id="status-text">CONNECTING...</span></span>
-    <span id="header-miner" class="text-dim"></span>
-    <span id="refresh-indicator" style="font-size:0.7rem;color:var(--amber-dim)"></span>
+    <span id="mode-badge" class="mode-badge solo">SOLO</span>
+    <span><span class="status-dot offline" id="status-dot"></span><span id="status-text">CONNECTING...</span></span>
+    <span id="refresh-ind" style="font-size:0.65rem;color:var(--amber-dim)"></span>
   </div>
 </header>
 
-<!-- Dashboard (shown immediately, populates as data arrives) -->
-<div id="dashboard">
+<!-- Connecting screen shown until first data arrives -->
+<div id="connecting">
+  <div class="connecting-icon">⛏</div>
+  <div class="connecting-text">CONNECTING TO MINER...</div>
+  <div style="font-size:0.7rem;color:var(--amber-dim)">Make sure the miner is running</div>
+</div>
 
-  <!-- Toolbar -->
-  <div class="toolbar">
-    <div class="chain-info">
-      MINER: <strong id="info-miner">—</strong> &nbsp;|&nbsp;
-      LAST UPDATE: <strong id="info-loaded">—</strong>
-    </div>
+<!-- Solo Mining View -->
+<div id="view-solo" class="page" style="display:none">
+  <div class="cards" id="solo-cards"></div>
+  <div class="charts-row">
+    <div class="panel" style="margin:0"><div class="panel-title">Hashrate Per Block</div><div class="chart-wrap"><canvas id="chart-hr"></canvas></div></div>
+    <div class="panel" style="margin:0"><div class="panel-title">Reward Per Block</div><div class="chart-wrap"><canvas id="chart-reward"></canvas></div></div>
+    <div class="panel" style="margin:0"><div class="panel-title">Difficulty Over Time</div><div class="chart-wrap"><canvas id="chart-diff"></canvas></div></div>
   </div>
-
-  <!-- Stat Cards -->
-  <div class="cards" id="cards"></div>
-
-  <!-- Chain Visualizer -->
-  <div class="panel section-gap">
+  <div class="panel">
     <div class="panel-title">Chain Visualization</div>
-    <div class="chain-vis" id="chain-vis"></div>
-    <div style="font-size:0.65rem;color:var(--amber-dim);margin-top:4px">
-      Darker = lower difficulty &nbsp;|&nbsp; Brighter = higher difficulty &nbsp;|&nbsp; Click any block for details
-    </div>
+    <div class="chain-vis" id="solo-chain-vis"></div>
+    <div style="font-size:0.6rem;color:var(--amber-dim)">Click any block for details</div>
   </div>
-
-  <!-- Charts -->
-  <div class="charts-row section-gap">
-    <div class="panel">
-      <div class="panel-title">Measured Hashrate Per Block</div>
-      <div class="chart-wrap"><canvas id="chart-hashrate"></canvas></div>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Reward Per Block</div>
-      <div class="chart-wrap"><canvas id="chart-rewards"></canvas></div>
-    </div>
-    <div class="panel">
-      <div class="panel-title">Difficulty Over Time</div>
-      <div class="chart-wrap"><canvas id="chart-difficulty"></canvas></div>
-    </div>
-  </div>
-
-  <!-- Power Calculator -->
-  <div class="panel section-gap">
-    <div class="panel-title">Electricity Cost Calculator</div>
-    <div class="calc-grid">
-      <div class="calc-field">
-        <label>CPU Power Draw (Watts)</label>
-        <input type="number" id="calc-watts" value="80" oninput="updateCalc()">
-      </div>
-      <div class="calc-field">
-        <label>Electricity Rate ($/kWh)</label>
-        <input type="number" id="calc-rate" value="0.15" step="0.01" oninput="updateCalc()">
-      </div>
-      <div class="calc-field">
-        <label>Hashrate (H/s) <span id="hr-source" style="color:var(--green);font-size:0.6rem"></span></label>
-        <input type="number" id="calc-hashrate" value="5700000" oninput="this.dataset.userEdited='1'; updateCalc()">
-      </div>
-    </div>
-    <div class="calc-results" id="calc-results"></div>
-  </div>
-
-  <!-- Block Explorer -->
-  <div class="panel section-gap">
+  <div class="panel">
     <div class="panel-title">Block Explorer</div>
-    <div class="block-list" id="block-list"></div>
+    <div class="block-list" id="solo-blocks"></div>
   </div>
+</div>
 
+<!-- Pool Server View -->
+<div id="view-server" class="page" style="display:none">
+  <div class="cards" id="server-cards"></div>
+  <div class="panel">
+    <div class="panel-title">Connected Miners — Contributions</div>
+    <table class="miner-table" id="miner-table">
+      <thead><tr>
+        <th>Miner</th><th>Hashrate</th><th>Blocks Won</th><th>Share %</th><th>Uptime</th><th>Contribution</th>
+      </tr></thead>
+      <tbody id="miner-tbody"></tbody>
+    </table>
+  </div>
+  <div class="charts-row">
+    <div class="panel" style="margin:0"><div class="panel-title">Pool Hashrate</div><div class="chart-wrap"><canvas id="pool-hr-chart"></canvas></div></div>
+    <div class="panel" style="margin:0"><div class="panel-title">Blocks By Miner</div><div class="chart-wrap"><canvas id="pool-contrib-chart"></canvas></div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Recent Blocks</div>
+    <div class="block-list" id="server-blocks"></div>
+  </div>
+</div>
+
+<!-- Pool Client View -->
+<div id="view-client" class="page" style="display:none">
+  <div style="margin-bottom:14px;font-size:0.75rem;color:var(--amber-dim)">
+    Viewing pool server stats. Your miner is one of the workers below.
+  </div>
+  <div class="cards" id="client-cards"></div>
+  <div class="panel">
+    <div class="panel-title">All Pool Miners — Your Contribution Highlighted</div>
+    <table class="miner-table" id="client-miner-table">
+      <thead><tr>
+        <th>Miner</th><th>Hashrate</th><th>Blocks Won</th><th>Share %</th><th>Uptime</th><th>Contribution</th>
+      </tr></thead>
+      <tbody id="client-miner-tbody"></tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <div class="panel-title">Recent Blocks</div>
+    <div class="block-list" id="client-blocks"></div>
+  </div>
 </div>
 
 <!-- Block Detail Modal -->
 <div id="modal-overlay" onclick="closeModal(event)">
-  <div class="modal" id="modal">
+  <div class="modal">
     <div class="modal-title">
       <span id="modal-title-text">BLOCK DETAILS</span>
       <button class="modal-close" onclick="document.getElementById('modal-overlay').classList.remove('open')">[ CLOSE ]</button>
@@ -629,406 +214,384 @@
   </div>
 </div>
 
-<!-- Toast -->
 <div id="toast"></div>
 
 <script>
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
+let mode          = null;   // 'solo' | 'pool_server' | 'pool_client'
+let soloChain     = null;
+let poolStats     = null;
+let lastBlocks    = 0;
+let pollTimer     = null;
+let poolHrHistory = [];
+let chartHr = null, chartReward = null, chartDiff = null;
+let poolHrChart = null, poolContribChart = null;
+const POLL_MS = 5000;
 
-let chain           = null;
-let chartRewards    = null;
-let chartDifficulty = null;
-let chartHashrate   = null;
-let pollTimer       = null;
-let lastBlockCount  = 0;
-const POLL_MS       = 5000;
-
-// ── Auto-connect ──────────────────────────────────────────────────────────────
-// Dashboard is always served by the miner's built-in HTTP server.
-// Fetches /chain immediately on load and polls every 5 seconds.
-// No file picker, no drag and drop — fully automatic.
-
-async function serverFetch() {
-  try {
-    const res  = await fetch('/chain?t=' + Date.now());
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    if (!data.chain) throw new Error('No chain data');
-    const initial  = !chain;
-    const newBlock = !initial && data.chain.length > lastBlockCount;
-    chain          = data;
-    lastBlockCount = data.chain.length;
-    renderDashboard();
-    if (initial)  showToast('Connected — ' + data.chain.length + ' blocks');
-    if (newBlock) showToast('⛏ New block! Chain: ' + data.chain.length + ' blocks');
-  } catch (err) {
-    document.getElementById('status-dot').classList.add('offline');
-    document.getElementById('status-text').textContent = 'WAITING FOR MINER...';
-    const ind = document.getElementById('refresh-indicator');
-    if (ind) { ind.textContent = 'retrying every 5s'; ind.style.color = 'var(--amber-dim)'; }
-  }
-}
-
-window.addEventListener('DOMContentLoaded', () => {
-  serverFetch();
-  pollTimer = setInterval(serverFetch, POLL_MS);
-});
-
-// ── Render ───────────────────────────────────────────────────────────────────
-
-function renderDashboard() {
-  document.getElementById('status-dot').classList.remove('offline');
-  document.getElementById('status-text').textContent    = 'LIVE';
-  document.getElementById('info-miner').textContent     = chain.miner_name || '—';
-  document.getElementById('info-loaded').textContent    = new Date().toLocaleTimeString();
-  document.getElementById('header-miner').textContent   = chain.miner_name || '';
-  const ind = document.getElementById('refresh-indicator');
-  if (ind) { ind.textContent = '⟳ auto-updating every 5s'; ind.style.color = 'var(--green)'; }
-
-  renderCards();
-  renderChainVis();
-  renderCharts();
-  renderBlockList();
-  updateCalc();
-}
-
-// ── Computed Stats ────────────────────────────────────────────────────────────
-
-function currentReward() {
-  const halvings = Math.floor(chain.chain.length / 100);
-  return 50 / Math.pow(2, halvings);
-}
-
-function avgBlockTime() {
-  const blocks = chain.chain.filter(b => b.index > 0);
-  if (blocks.length < 2) return 0;
-  const recent  = blocks.slice(-Math.min(10, blocks.length));
-  const elapsed = recent[recent.length - 1].timestamp - recent[0].timestamp;
-  return Math.round(elapsed / (recent.length - 1));
-}
-
-// Parse "Block #N mined after X attempts" from the data field
-function parseAttempts(dataStr) {
-  const m = dataStr.match(/after ([\d,]+) attempts/);
-  if (!m) return null;
-  return parseInt(m[1].replace(/,/g, ''), 10);
-}
-
-// Measured hashrate from recent blocks: attempts / block_time
-function measuredHashrate() {
-  const blocks = chain.chain.filter(b => b.index > 0);
-  if (blocks.length < 2) return null;
-
-  const recent = blocks.slice(-Math.min(5, blocks.length));
-  const samples = [];
-
-  for (let i = 1; i < recent.length; i++) {
-    const attempts = parseAttempts(recent[i].data);
-    const dt = recent[i].timestamp - recent[i - 1].timestamp;
-    if (attempts !== null && dt > 0) {
-      samples.push(attempts / dt);
-    }
-  }
-
-  if (samples.length === 0) return null;
-  return Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
-}
-
-// Per-block hashrate for charting
-function hashratePerBlock() {
-  const blocks = chain.chain.filter(b => b.index > 0);
-  const result = [];
-  for (let i = 1; i < blocks.length; i++) {
-    const attempts = parseAttempts(blocks[i].data);
-    const dt = blocks[i].timestamp - blocks[i - 1].timestamp;
-    if (attempts !== null && dt > 0) {
-      result.push({ index: blocks[i].index, hr: Math.round(attempts / dt) });
-    }
-  }
-  return result;
-}
-
-function fmtHashrate(hr) {
-  if (hr >= 1_000_000) return (hr / 1_000_000).toFixed(2) + ' MH/s';
-  if (hr >= 1_000)     return (hr / 1_000).toFixed(2) + ' KH/s';
-  return hr.toFixed(0) + ' H/s';
-}
-
-// ── Cards ─────────────────────────────────────────────────────────────────────
-
-function renderCards() {
-  const blocks   = chain.chain.filter(b => b.index > 0);
-  const total    = chain.total_mined || 0;
-  const diff     = chain.difficulty || 1;
-  const reward   = chain.chain.length > 0 ? currentReward() : 0;
-  const avgTime  = avgBlockTime();
-  const halving  = 100 - (chain.chain.length % 100);
-  const hr       = measuredHashrate();
-  const hrStr    = hr ? fmtHashrate(hr) : '—';
-  const hrSub    = hr ? 'avg of last 5 blocks' : 'need 2+ blocks';
-
-  // Difficulty target label
-  const targetZeros = '0'.repeat(diff);
-  const targetRest  = 'x'.repeat(Math.max(0, 16 - diff));
-  const targetLabel = targetZeros + targetRest + '…';
-
-  const cards = [
-    { label: 'Blocks Mined',      value: blocks.length,                  sub: chain.chain.length + ' total incl. genesis' },
-    { label: 'CC Earned',         value: total.toFixed(4),               sub: 'CryptoCraft Coins', cls: 'green' },
-    { label: 'Measured Hashrate', value: hrStr,                          sub: hrSub, cls: hr ? '' : '' },
-    { label: 'Current Target',    value: diff + ' zeros',                sub: targetLabel, cls: '' },
-    { label: 'Block Reward',      value: reward.toFixed(4) + ' CC',      sub: 'Halving in ' + halving + ' blocks' },
-    { label: 'Avg Block Time',    value: avgTime > 0 ? fmtDuration(avgTime) : '—', sub: 'last 10 blocks' },
-  ];
-
-  document.getElementById('cards').innerHTML = cards.map(c => `
-    <div class="card">
-      <div class="card-label">${c.label}</div>
-      <div class="card-value ${c.cls || ''} ${String(c.value).length > 9 ? 'small' : ''}">${c.value}</div>
-      <div class="card-sub">${c.sub}</div>
-    </div>
-  `).join('');
-
-  // Auto-fill hashrate in calculator whenever we have a measurement
-  if (hr) {
-    const hrInput  = document.getElementById('calc-hashrate');
-    const hrSource = document.getElementById('hr-source');
-    if (!hrInput.dataset.userEdited) {
-      hrInput.value = hr;
-      if (hrSource) hrSource.textContent = '← measured from chain';
-      updateCalc();
-    }
-  }
-}
-
-// ── Chain Visualizer ─────────────────────────────────────────────────────────
-
-function renderChainVis() {
-  const vis = document.getElementById('chain-vis');
-  const blocks = chain.chain.slice(-60); // show last 60
-  vis.innerHTML = blocks.map((b, i) => {
-    const dClass = b.index === 0 ? 'genesis' : `d${Math.min(b.difficulty, 8)}`;
-    const label  = b.index === 0 ? 'GEN' : '#' + b.index;
-    return (i > 0 ? '<div class="chain-link"></div>' : '') +
-      `<div class="chain-block ${dClass}" onclick="showBlock(${b.index})" title="Block #${b.index}">${label}</div>`;
-  }).join('');
-  // Scroll to end
-  vis.scrollLeft = vis.scrollWidth;
-}
-
-// ── Charts ───────────────────────────────────────────────────────────────────
-
-const chartDefaults = {
-  responsive: true,
-  maintainAspectRatio: false,
+// ── Chart defaults ────────────────────────────────────────────────────────────
+const CD = {
+  responsive: true, maintainAspectRatio: false,
   plugins: { legend: { display: false } },
   scales: {
-    x: {
-      ticks: { color: '#b37800', font: { family: 'Share Tech Mono', size: 10 }, maxTicksLimit: 8 },
-      grid: { color: 'rgba(255,176,0,0.08)' },
-      border: { color: 'rgba(255,176,0,0.2)' }
-    },
-    y: {
-      ticks: { color: '#b37800', font: { family: 'Share Tech Mono', size: 10 } },
-      grid: { color: 'rgba(255,176,0,0.08)' },
-      border: { color: 'rgba(255,176,0,0.2)' }
-    }
+    x: { ticks: { color:'#b37800', font:{family:'Share Tech Mono',size:9}, maxTicksLimit:7 }, grid:{color:'rgba(255,176,0,0.07)'}, border:{color:'rgba(255,176,0,0.2)'} },
+    y: { ticks: { color:'#b37800', font:{family:'Share Tech Mono',size:9} }, grid:{color:'rgba(255,176,0,0.07)'}, border:{color:'rgba(255,176,0,0.2)'} }
   }
 };
 
-function renderCharts() {
-  const minedBlocks = chain.chain.filter(b => b.index > 0);
-  const labels      = minedBlocks.map(b => '#' + b.index);
-  const rewards     = minedBlocks.map(b => b.reward);
-  const diffs       = minedBlocks.map(b => b.difficulty);
+// ── Boot ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const res  = await fetch('/status?t=' + Date.now());
+    const data = await res.json();
+    mode = data.mode || 'solo';
+  } catch(e) {
+    mode = 'solo'; // default fallback
+  }
 
-  // Hashrate per block
-  const hrData   = hashratePerBlock();
-  const hrLabels = hrData.map(d => '#' + d.index);
-  const hrValues = hrData.map(d => d.hr);
+  // Style the mode badge
+  const badge = document.getElementById('mode-badge');
+  badge.textContent = mode === 'pool_server' ? 'POOL SERVER'
+                    : mode === 'pool_client' ? 'POOL CLIENT'
+                    : 'SOLO';
+  badge.className = 'mode-badge ' + (mode === 'pool_server' ? 'server'
+                                   : mode === 'pool_client' ? 'client' : 'solo');
 
-  if (chartHashrate)   { chartHashrate.destroy(); }
-  if (chartRewards)    { chartRewards.destroy(); }
-  if (chartDifficulty) { chartDifficulty.destroy(); }
+  // Start polling
+  await tick();
+  pollTimer = setInterval(tick, POLL_MS);
+});
 
-  chartHashrate = new Chart(document.getElementById('chart-hashrate'), {
-    type: 'line',
-    data: {
-      labels: hrLabels,
-      datasets: [{
-        data: hrValues,
-        borderColor: '#ffb000',
-        backgroundColor: 'rgba(255,176,0,0.07)',
-        borderWidth: 2,
-        pointRadius: 3,
-        pointBackgroundColor: '#ffb000',
-        fill: true,
-        tension: 0.3,
-      }]
-    },
-    options: {
-      ...chartDefaults,
-      plugins: {
-        ...chartDefaults.plugins,
-        tooltip: {
-          callbacks: {
-            label: ctx => ' ' + fmtHashrate(ctx.raw)
-          }
-        }
-      },
-      scales: {
-        ...chartDefaults.scales,
-        y: {
-          ...chartDefaults.scales.y,
-          ticks: {
-            ...chartDefaults.scales.y.ticks,
-            callback: v => fmtHashrate(v)
-          }
-        }
-      }
+async function tick() {
+  try {
+    if (mode === 'solo') {
+      const res  = await fetch('/chain?t=' + Date.now());
+      const data = await res.json();
+      if (!data.chain) throw new Error('no chain');
+      const isNew   = !soloChain;
+      const newBlk  = !isNew && data.chain.length > lastBlocks;
+      soloChain  = data;
+      lastBlocks = data.chain.length;
+      renderSolo();
+      if (isNew)  showToast('Connected — ' + data.chain.length + ' blocks');
+      if (newBlk) showToast('⛏ New block! #' + (data.chain.length - 1));
+    } else {
+      // Both pool_server and pool_client fetch /pool_stats from the server
+      const res  = await fetch('/pool_stats?t=' + Date.now());
+      const data = await res.json();
+      const isNew  = !poolStats;
+      const newBlk = !isNew && data.chain_length > lastBlocks;
+      poolStats  = data;
+      lastBlocks = data.chain_length;
+      poolHrHistory.push({ t: new Date().toLocaleTimeString(), hr: data.total_hashrate });
+      if (poolHrHistory.length > 20) poolHrHistory.shift();
+      if (mode === 'pool_server') renderServer();
+      else                        renderClient();
+      if (isNew)  showToast('Connected to pool — ' + data.chain_length + ' blocks');
+      if (newBlk) showToast('⛏ New pool block! Chain: ' + data.chain_length);
     }
+    setConnected(true);
+  } catch(e) {
+    setConnected(false);
+  }
+}
+
+function setConnected(ok) {
+  document.getElementById('status-dot').className = 'status-dot ' + (ok ? 'live' : 'offline');
+  document.getElementById('status-text').textContent = ok ? 'LIVE' : 'WAITING FOR MINER...';
+  document.getElementById('refresh-ind').textContent = ok ? '⟳ every 5s' : 'retrying...';
+  document.getElementById('refresh-ind').style.color = ok ? 'var(--green)' : 'var(--amber-dim)';
+}
+
+// ── Solo view ─────────────────────────────────────────────────────────────────
+function renderSolo() {
+  show('view-solo');
+  const bc     = soloChain;
+  const blocks = bc.chain.filter(b => b.index > 0);
+  const avgT   = avgBlockTime(blocks);
+  const hr     = measuredHr(blocks);
+  const reward = currentReward(bc.chain.length);
+  const halvIn = 100 - (bc.chain.length % 100);
+
+  setCards('solo-cards', [
+    { label:'Blocks Mined',    value: blocks.length,                      sub: bc.chain.length + ' total incl. genesis' },
+    { label:'CC Earned',       value: (bc.total_mined||0).toFixed(4),     sub: 'CryptoCraft Coins', cls:'green' },
+    { label:'Hashrate',        value: hr ? fmtHr(hr) : '—',              sub: 'avg last 5 blocks' },
+    { label:'Difficulty',      value: bc.difficulty + ' zeros',           sub: zeroPreview(bc.difficulty) },
+    { label:'Block Reward',    value: reward.toFixed(4) + ' CC',          sub: 'Halving in ' + halvIn + ' blocks' },
+    { label:'Avg Block Time',  value: avgT > 0 ? fmtDur(avgT) : '—',     sub: 'last 10 blocks' },
+  ]);
+
+  // Chain visualizer
+  const vis = document.getElementById('solo-chain-vis');
+  const recent = bc.chain.slice(-60);
+  vis.innerHTML = recent.map((b,i) => {
+    const dc = 'd' + Math.min(b.difficulty||1, 8);
+    return (i>0?'<div class="cv-link"></div>':'') +
+      `<div class="cv-block ${dc}" onclick="showBlock(${b.index})" title="Block #${b.index}">${b.index===0?'GEN':'#'+b.index}</div>`;
+  }).join('');
+  vis.scrollLeft = vis.scrollWidth;
+
+  // Charts
+  renderSoloCharts(blocks);
+
+  // Block list
+  renderBlockList('solo-blocks', bc.chain, false);
+}
+
+function renderSoloCharts(blocks) {
+  const labels  = blocks.map(b => '#' + b.index);
+  const rewards = blocks.map(b => b.reward);
+  const diffs   = blocks.map(b => b.difficulty);
+  const hrData  = hrPerBlock(blocks);
+
+  if (chartHr)     { chartHr.destroy(); }
+  if (chartReward) { chartReward.destroy(); }
+  if (chartDiff)   { chartDiff.destroy(); }
+
+  chartHr = new Chart(document.getElementById('chart-hr'), {
+    type: 'line',
+    data: { labels: hrData.map(d=>'#'+d.i), datasets: [{ data: hrData.map(d=>d.hr), borderColor:'#ffb000', backgroundColor:'rgba(255,176,0,0.07)', borderWidth:2, pointRadius:3, fill:true, tension:0.3 }] },
+    options: { ...CD, plugins:{...CD.plugins, tooltip:{callbacks:{label:c=>' '+fmtHr(c.raw)}}}, scales:{...CD.scales,y:{...CD.scales.y,ticks:{...CD.scales.y.ticks,callback:v=>fmtHr(v)}}} }
   });
 
-  chartRewards = new Chart(document.getElementById('chart-rewards'), {
+  chartReward = new Chart(document.getElementById('chart-reward'), {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [{
-        data: rewards,
-        backgroundColor: 'rgba(0,255,136,0.3)',
-        borderColor: '#00ff88',
-        borderWidth: 1,
-      }]
-    },
-    options: { ...chartDefaults }
+    data: { labels, datasets: [{ data: rewards, backgroundColor:'rgba(0,255,136,0.3)', borderColor:'#00ff88', borderWidth:1 }] },
+    options: CD
   });
 
-  chartDifficulty = new Chart(document.getElementById('chart-difficulty'), {
+  chartDiff = new Chart(document.getElementById('chart-diff'), {
     type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data: diffs,
-        borderColor: '#ff4444',
-        backgroundColor: 'rgba(255,68,68,0.07)',
-        borderWidth: 2,
-        pointRadius: 3,
-        pointBackgroundColor: '#ff4444',
-        fill: true,
-        stepped: true,
-      }]
-    },
-    options: {
-      ...chartDefaults,
-      scales: {
-        ...chartDefaults.scales,
-        y: {
-          ...chartDefaults.scales.y,
-          min: 0,
-          max: 9,
-          ticks: { ...chartDefaults.scales.y.ticks, stepSize: 1 }
-        }
-      }
-    }
+    data: { labels, datasets: [{ data: diffs, borderColor:'#ff4444', backgroundColor:'rgba(255,68,68,0.07)', borderWidth:2, pointRadius:3, fill:true, stepped:true }] },
+    options: { ...CD, scales:{...CD.scales,y:{...CD.scales.y,min:0,max:9,ticks:{...CD.scales.y.ticks,stepSize:1}}} }
   });
 }
 
-// ── Block List ───────────────────────────────────────────────────────────────
+// ── Pool Server view ──────────────────────────────────────────────────────────
+function renderServer() {
+  show('view-server');
+  const ps = poolStats;
+  const totalHr = ps.total_hashrate || 0;
 
-function renderBlockList() {
-  const list = document.getElementById('block-list');
-  const rows = [...chain.chain].reverse().map(b => {
-    const zeros    = b.hash.match(/^0*/)[0].length;
-    const hashDisp = `<span class="zeros">${b.hash.slice(0, zeros)}</span>${b.hash.slice(zeros, 16)}…${b.hash.slice(-8)}`;
-    const timeStr  = new Date(b.timestamp * 1000).toLocaleString();
-    const isGenesis = b.index === 0;
-    return `
-      <div class="block-row ${isGenesis ? 'genesis' : ''}" onclick="showBlock(${b.index})">
-        <div class="block-index">#${b.index}</div>
-        <div class="block-hash mono">${hashDisp}</div>
-        <div class="block-zeros">${zeros} zeros</div>
-        <div class="block-reward">${isGenesis ? '—' : b.reward.toFixed(4) + ' CC'}</div>
-        <div class="block-time">${timeStr}</div>
-      </div>`;
+  setCards('server-cards', [
+    { label:'Chain Length',    value: ps.chain_length,               sub: 'blocks including genesis' },
+    { label:'CC Mined Total',  value: (ps.total_mined||0).toFixed(4), sub: 'by all miners', cls:'green' },
+    { label:'Pool Hashrate',   value: fmtHr(totalHr),                sub: 'combined all miners', cls:'green' },
+    { label:'Difficulty',      value: ps.difficulty + ' zeros',       sub: zeroPreview(ps.difficulty) },
+    { label:'Miners Online',   value: ps.miners ? ps.miners.length : 0, sub: 'connected right now' },
+    { label:'Blocks Found',    value: ps.blocks_total || 0,           sub: 'by pool since start' },
+  ]);
+
+  // Miner table
+  const tbody = document.getElementById('miner-tbody');
+  const miners = ps.miners || [];
+  const totalBlocks = miners.reduce((s,m) => s + (m.blocks_found||0), 0) || 1;
+  tbody.innerHTML = miners.length === 0
+    ? '<tr><td colspan="6" style="color:var(--amber-dim);text-align:center;padding:20px">No miners connected yet</td></tr>'
+    : miners.sort((a,b) => b.hashrate - a.hashrate).map(m => {
+        const share = totalHr > 0 ? ((m.hashrate / totalHr) * 100).toFixed(1) : '0.0';
+        const blockShare = ((m.blocks_found / totalBlocks) * 100).toFixed(1);
+        return `<tr>
+          <td>${m.name}</td>
+          <td class="green">${fmtHr(m.hashrate)}</td>
+          <td>${m.blocks_found}</td>
+          <td class="green">${share}%</td>
+          <td style="color:var(--amber-dim)">${fmtUp(m.uptime_secs)}</td>
+          <td style="min-width:100px">
+            <div style="font-size:0.65rem;margin-bottom:3px">${blockShare}% of blocks</div>
+            <div class="contrib-bar"><div class="contrib-fill" style="width:${blockShare}%"></div></div>
+          </td>
+        </tr>`;
+      }).join('');
+
+  // Pool hashrate over time chart
+  if (poolHrChart) { poolHrChart.destroy(); }
+  poolHrChart = new Chart(document.getElementById('pool-hr-chart'), {
+    type: 'line',
+    data: { labels: poolHrHistory.map(d=>d.t), datasets: [{ data: poolHrHistory.map(d=>d.hr), borderColor:'#00ff88', backgroundColor:'rgba(0,255,136,0.07)', borderWidth:2, pointRadius:2, fill:true, tension:0.3 }] },
+    options: { ...CD, plugins:{...CD.plugins,tooltip:{callbacks:{label:c=>' '+fmtHr(c.raw)}}}, scales:{...CD.scales,y:{...CD.scales.y,ticks:{...CD.scales.y.ticks,callback:v=>fmtHr(v)}}} }
   });
 
-  list.innerHTML = `
-    <div class="block-row header">
-      <div>Index</div><div>Hash</div><div>Zeros</div><div>Reward</div><div>Time</div>
-    </div>` + rows.join('');
+  // Blocks by miner donut
+  if (poolContribChart) { poolContribChart.destroy(); }
+  if (miners.length > 0) {
+    const colors = ['#00ff88','#ffb000','#00aaff','#ff4444','#aa00ff','#ff8800'];
+    poolContribChart = new Chart(document.getElementById('pool-contrib-chart'), {
+      type: 'doughnut',
+      data: { labels: miners.map(m=>m.name), datasets: [{ data: miners.map(m=>m.blocks_found||0), backgroundColor: miners.map((_,i)=>colors[i%colors.length]+'88'), borderColor: miners.map((_,i)=>colors[i%colors.length]), borderWidth: 1 }] },
+      options: { responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:true, labels:{ color:'#b37800', font:{family:'Share Tech Mono',size:10}, padding:12 } } } }
+    });
+  }
+
+  renderBlockList('server-blocks', ps.recent_blocks || [], true);
 }
 
-// ── Block Modal ───────────────────────────────────────────────────────────────
+// ── Pool Client view ──────────────────────────────────────────────────────────
+function renderClient() {
+  show('view-client');
+  const ps = poolStats;
+  const totalHr = ps.total_hashrate || 0;
+  const miners = ps.miners || [];
+  const totalBlocks = miners.reduce((s,m) => s + (m.blocks_found||0), 0) || 1;
+
+  setCards('client-cards', [
+    { label:'Pool Chain',     value: ps.chain_length,                sub: 'total blocks' },
+    { label:'Pool CC Mined',  value: (ps.total_mined||0).toFixed(4), sub: 'combined earnings', cls:'green' },
+    { label:'Pool Hashrate',  value: fmtHr(totalHr),                 sub: 'all miners combined', cls:'green' },
+    { label:'Difficulty',     value: ps.difficulty + ' zeros',        sub: zeroPreview(ps.difficulty) },
+    { label:'Miners Online',  value: miners.length,                   sub: 'including you' },
+    { label:'Blocks Found',   value: ps.blocks_total || 0,            sub: 'pool total' },
+  ]);
+
+  // Miner table — same as server but "you" row detection is tricky without a
+  // local name, so we highlight the top miner differently or just show all
+  const tbody = document.getElementById('client-miner-tbody');
+  tbody.innerHTML = miners.length === 0
+    ? '<tr><td colspan="6" style="color:var(--amber-dim);text-align:center;padding:20px">No miners visible yet</td></tr>'
+    : miners.sort((a,b) => b.hashrate - a.hashrate).map((m,i) => {
+        const share      = totalHr > 0 ? ((m.hashrate / totalHr) * 100).toFixed(1) : '0.0';
+        const blockShare = ((m.blocks_found / totalBlocks) * 100).toFixed(1);
+        const isTop      = i === 0;
+        return `<tr style="${isTop ? 'color:var(--green)' : ''}">
+          <td>${m.name}${isTop ? ' ★' : ''}</td>
+          <td class="green">${fmtHr(m.hashrate)}</td>
+          <td>${m.blocks_found}</td>
+          <td class="${isTop?'green':''}">${share}%</td>
+          <td style="color:var(--amber-dim)">${fmtUp(m.uptime_secs)}</td>
+          <td style="min-width:100px">
+            <div style="font-size:0.65rem;margin-bottom:3px">${blockShare}% of blocks</div>
+            <div class="contrib-bar"><div class="contrib-fill" style="width:${blockShare}%;background:${isTop?'var(--green)':'var(--amber)'}"></div></div>
+          </td>
+        </tr>`;
+      }).join('');
+
+  renderBlockList('client-blocks', ps.recent_blocks || [], true);
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+function show(id) {
+  document.getElementById('connecting').style.display  = 'none';
+  document.getElementById('view-solo').style.display   = 'none';
+  document.getElementById('view-server').style.display = 'none';
+  document.getElementById('view-client').style.display = 'none';
+  document.getElementById(id).style.display = 'block';
+}
+
+function setCards(containerId, cards) {
+  document.getElementById(containerId).innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="card-label">${c.label}</div>
+      <div class="card-value ${c.cls||''} ${String(c.value).length > 9 ? 'sm' : ''}">${c.value}</div>
+      <div class="card-sub">${c.sub}</div>
+    </div>`).join('');
+}
+
+function renderBlockList(id, blocks, isPool) {
+  const el = document.getElementById(id);
+  const cols = isPool
+    ? '55px 1fr 80px 75px 95px'
+    : '55px 1fr 80px 75px 95px';
+
+  const rows = [...blocks].reverse().map(b => {
+    const zeros = (b.hash||'').match(/^0*/)[0].length;
+    const hd = `<span class="z">${(b.hash||'').slice(0,zeros)}</span>${(b.hash||'').slice(zeros,14)}…`;
+    return `<div class="block-row" onclick="showBlockData(${JSON.stringify(b).replace(/"/g,'&quot;')})">
+      <div>#${b.index}</div>
+      <div class="block-hash">${hd}</div>
+      <div>${zeros} zeros</div>
+      <div class="block-miner">${(b.miner||'').slice(0,10)}</div>
+      <div style="color:var(--amber-dim);font-size:0.68rem">${new Date((b.timestamp||0)*1000).toLocaleTimeString()}</div>
+    </div>`;
+  });
+
+  el.innerHTML = `<div class="block-row hdr"><div>Index</div><div>Hash</div><div>Zeros</div><div>Miner</div><div>Time</div></div>` + rows.join('');
+}
 
 function showBlock(index) {
-  const b = chain.chain.find(b => b.index === index);
-  if (!b) return;
+  if (!soloChain) return;
+  const b = soloChain.chain.find(b => b.index === index);
+  if (b) showBlockData(b);
+}
 
-  const zeros    = b.hash.match(/^0*/)[0].length;
-  const hashDisp = `<span class="zeros">${b.hash.slice(0, zeros)}</span>${b.hash.slice(zeros)}`;
-
+function showBlockData(b) {
+  const zeros = (b.hash||'').match(/^0*/)[0].length;
+  const hd = `<span class="z">${(b.hash||'').slice(0,zeros)}</span>${(b.hash||'').slice(zeros)}`;
   document.getElementById('modal-title-text').textContent = `BLOCK #${b.index}`;
   document.getElementById('modal-body').innerHTML = `
-    <div class="modal-field"><div class="modal-field-label">Hash</div><div class="modal-field-val mono">${hashDisp}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Previous Hash</div><div class="modal-field-val mono text-dim">${b.previous_hash}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Nonce</div><div class="modal-field-val mono">${b.nonce.toLocaleString()}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Timestamp</div><div class="modal-field-val">${new Date(b.timestamp * 1000).toLocaleString()}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Difficulty</div><div class="modal-field-val">${b.difficulty} leading zeros</div></div>
-    <div class="modal-field"><div class="modal-field-label">Reward</div><div class="modal-field-val text-green">${b.reward} CC</div></div>
-    <div class="modal-field"><div class="modal-field-label">Miner</div><div class="modal-field-val">${b.miner}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Data</div><div class="modal-field-val text-dim">${b.data}</div></div>
-    <div class="modal-field"><div class="modal-field-label">Leading Zeros Found</div><div class="modal-field-val text-green">${zeros} / ${b.difficulty} required</div></div>
-  `;
+    <div class="mf"><div class="mf-label">Hash</div><div class="mf-val">${hd}</div></div>
+    <div class="mf"><div class="mf-label">Previous Hash</div><div class="mf-val" style="color:var(--amber-dim)">${b.previous_hash||'—'}</div></div>
+    <div class="mf"><div class="mf-label">Nonce</div><div class="mf-val">${(b.nonce||0).toLocaleString()}</div></div>
+    <div class="mf"><div class="mf-label">Timestamp</div><div class="mf-val">${new Date((b.timestamp||0)*1000).toLocaleString()}</div></div>
+    <div class="mf"><div class="mf-label">Difficulty</div><div class="mf-val">${b.difficulty} leading zeros</div></div>
+    <div class="mf"><div class="mf-label">Reward</div><div class="mf-val" style="color:var(--green)">${b.reward} CC</div></div>
+    <div class="mf"><div class="mf-label">Miner</div><div class="mf-val">${b.miner||'—'}</div></div>
+    <div class="mf"><div class="mf-label">Data</div><div class="mf-val" style="color:var(--amber-dim)">${b.data||'—'}</div></div>`;
   document.getElementById('modal-overlay').classList.add('open');
 }
 
 function closeModal(e) {
-  if (e.target === document.getElementById('modal-overlay')) {
+  if (e.target === document.getElementById('modal-overlay'))
     document.getElementById('modal-overlay').classList.remove('open');
+}
+
+// ── Chain calculations ────────────────────────────────────────────────────────
+function currentReward(chainLen) {
+  const halvings = Math.floor(chainLen / 100);
+  return 50 / Math.pow(2, halvings);
+}
+
+function avgBlockTime(blocks) {
+  if (blocks.length < 2) return 0;
+  const r = blocks.slice(-Math.min(10, blocks.length));
+  return Math.round((r[r.length-1].timestamp - r[0].timestamp) / (r.length-1));
+}
+
+function measuredHr(blocks) {
+  if (blocks.length < 2) return null;
+  const r = blocks.slice(-Math.min(5, blocks.length));
+  const samples = [];
+  for (let i = 1; i < r.length; i++) {
+    const m = (r[i].data||'').match(/after ([\d,]+) attempts/);
+    const attempts = m ? parseInt(m[1].replace(/,/g,''), 10) : null;
+    const dt = r[i].timestamp - r[i-1].timestamp;
+    if (attempts !== null && dt > 0) samples.push(attempts / dt);
   }
+  if (!samples.length) return null;
+  return Math.round(samples.reduce((a,b)=>a+b,0) / samples.length);
 }
 
-// ── Power Calculator ──────────────────────────────────────────────────────────
-
-function updateCalc() {
-  const watts    = parseFloat(document.getElementById('calc-watts').value)    || 80;
-  const rate     = parseFloat(document.getElementById('calc-rate').value)     || 0.15;
-  const hashrate = parseFloat(document.getElementById('calc-hashrate').value) || 5700000;
-
-  const costPerHour  = (watts / 1000) * rate;
-  const diff         = chain ? chain.difficulty : 7;
-  const expectedHash = Math.pow(16, diff);
-  const secsPerBlock = expectedHash / hashrate;
-  const costPerBlock = costPerHour * (secsPerBlock / 3600);
-  const reward       = chain ? currentReward() : 50;
-  const costPerCC    = reward > 0 ? costPerBlock / reward : 0;
-  const ccPerHour    = (hashrate / expectedHash) * 3600 * reward;
-  const profitPerHr  = ccPerHour * costPerCC - costPerHour; // always 0 since CC has no market
-
-  const results = [
-    { label: 'Cost Per Hour',  val: '$' + costPerHour.toFixed(4),  cls: '' },
-    { label: 'Est. Block Time', val: fmtDuration(secsPerBlock),    cls: '' },
-    { label: 'Cost Per Block', val: '$' + costPerBlock.toFixed(5),  cls: '' },
-    { label: 'Cost Per 1 CC',  val: '$' + costPerCC.toFixed(5),    cls: '' },
-    { label: 'CC Per Hour',    val: ccPerHour.toFixed(4) + ' CC',  cls: 'green' },
-    { label: 'CC Per Day',     val: (ccPerHour * 24).toFixed(2) + ' CC', cls: 'green' },
-  ];
-
-  document.getElementById('calc-results').innerHTML = results.map(r => `
-    <div class="calc-result">
-      <div class="calc-result-label">${r.label}</div>
-      <div class="calc-result-val ${r.cls}">${r.val}</div>
-    </div>
-  `).join('');
+function hrPerBlock(blocks) {
+  const out = [];
+  for (let i = 1; i < blocks.length; i++) {
+    const m = (blocks[i].data||'').match(/after ([\d,]+) attempts/);
+    const attempts = m ? parseInt(m[1].replace(/,/g,''), 10) : null;
+    const dt = blocks[i].timestamp - blocks[i-1].timestamp;
+    if (attempts !== null && dt > 0) out.push({ i: blocks[i].index, hr: Math.round(attempts/dt) });
+  }
+  return out;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+function zeroPreview(d) {
+  return '0'.repeat(Math.min(d,8)) + 'x'.repeat(Math.max(0,8-d)) + '…';
+}
 
-function fmtDuration(secs) {
-  secs = Math.round(secs);
-  if (secs < 60)   return secs + 's';
-  if (secs < 3600) return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
-  return Math.floor(secs/3600) + 'h ' + Math.floor((secs%3600)/60) + 'm';
+// ── Formatters ────────────────────────────────────────────────────────────────
+function fmtHr(hr) {
+  if (!hr) return '0 H/s';
+  if (hr >= 1e6) return (hr/1e6).toFixed(2) + ' MH/s';
+  if (hr >= 1e3) return (hr/1e3).toFixed(2) + ' KH/s';
+  return hr.toFixed(0) + ' H/s';
+}
+function fmtDur(s) {
+  s = Math.round(s);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+function fmtUp(s) {
+  if (!s) return '—';
+  return fmtDur(s);
 }
 
 function showToast(msg) {
