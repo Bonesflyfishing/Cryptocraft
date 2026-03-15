@@ -1,33 +1,17 @@
 // ─── auth.rs ──────────────────────────────────────────────────────────────────
-// SQLite-backed authentication.
-//
-// The database lives in a single file: cryptocraft_users.db
-// It has one table:
-//
-//   CREATE TABLE users (
-//       user_id       TEXT PRIMARY KEY,   -- UUID
-//       email         TEXT UNIQUE,        -- lowercase, trimmed
-//       password_hash TEXT,               -- Argon2id hash
-//       created_at    INTEGER             -- Unix timestamp
-//   )
-//
-// Passwords are never stored in plain text — only the Argon2id hash.
-// The AuthProvider trait is unchanged so swapping to a server backend later
-// still requires zero changes in main.rs.
+// Authentication using the shared SQLite Db handle from db.rs.
+// Passwords are hashed with Argon2id — never stored plain.
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::db::{self, Db};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
 use crossterm::{execute, style::{Color, ResetColor, SetForegroundColor}};
-use rusqlite::{Connection, params};
-use std::{
-    io::{self, Write},
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-const DB_FILE: &str = "cryptocraft_users.db";
+use rusqlite::params;
+use std::io::{self, Write};
+use uuid::Uuid;
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -48,38 +32,22 @@ pub trait AuthProvider {
 // ─── SQLite implementation ────────────────────────────────────────────────────
 
 pub struct LocalAuthProvider {
-    conn: Connection,
+    db: Db,
 }
 
 impl LocalAuthProvider {
-    /// Open (or create) the SQLite database and make sure the users table exists.
-    pub fn load() -> Self {
-        let conn = Connection::open(DB_FILE)
-            .expect("Failed to open SQLite database");
-
-        // CREATE TABLE IF NOT EXISTS is safe to run every launch.
-        // If the table already exists this is a no-op.
-        conn.execute_batch("
-            CREATE TABLE IF NOT EXISTS users (
-                user_id       TEXT PRIMARY KEY,
-                email         TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at    INTEGER NOT NULL
-            );
-        ").expect("Failed to create users table");
-
-        LocalAuthProvider { conn }
+    pub fn new(db: Db) -> Self {
+        LocalAuthProvider { db }
     }
 
-    /// Returns true if at least one user exists in the database.
     pub fn has_users(&self) -> bool {
-        let count: i64 = self.conn
+        let conn = self.db.lock().unwrap();
+        let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
             .unwrap_or(0);
         count > 0
     }
 
-    /// Turn an email into a safe filename for the chain JSON.
     fn chain_file_for(email: &str) -> String {
         let safe = email.replace(['@', '.', '+', ' '], "_");
         format!("cryptocraft_chain_{}.json", safe)
@@ -90,7 +58,6 @@ impl AuthProvider for LocalAuthProvider {
     fn register(&mut self, email: &str, password: &str) -> Result<Session, String> {
         let email = email.trim().to_lowercase();
 
-        // ── Validate ──────────────────────────────────────────────────────────
         if email.is_empty() || !email.contains('@') {
             return Err("Please enter a valid email address.".into());
         }
@@ -98,39 +65,43 @@ impl AuthProvider for LocalAuthProvider {
             return Err("Password must be at least 8 characters.".into());
         }
 
-        // ── Check for duplicate email ─────────────────────────────────────────
-        let exists: bool = self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM users WHERE email = ?1",
-                params![email],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .unwrap_or(false);
-
-        if exists {
-            return Err("An account with that email already exists.".into());
+        // Check for duplicate
+        {
+            let conn = self.db.lock().unwrap();
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM users WHERE email = ?1",
+                    params![email],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if exists {
+                return Err("An account with that email already exists.".into());
+            }
         }
 
-        // ── Hash password with Argon2id ───────────────────────────────────────
-        // A unique random salt per user means identical passwords produce
-        // completely different hashes in the database.
+        // Hash password
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(password.as_bytes(), &salt)
             .map_err(|e| e.to_string())?
             .to_string();
 
-        // ── INSERT into SQLite ────────────────────────────────────────────────
-        let user_id    = uuid::Uuid::new_v4().to_string();
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let user_id    = Uuid::new_v4().to_string();
+        let created_at = db::now_ts();
 
-        self.conn.execute(
-            "INSERT INTO users (user_id, email, password_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![user_id, email, hash, created_at],
-        ).map_err(|e| format!("Database error: {}", e))?;
+        {
+            let conn = self.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO users (user_id, email, password_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![user_id, email, hash, created_at],
+            ).map_err(|e| format!("Database error: {}", e))?;
+        }
+
+        // Create a zero balance row for this new user
+        db::ensure_balance_row(&self.db, &user_id);
 
         Ok(Session {
             chain_file: Self::chain_file_for(&email),
@@ -142,23 +113,22 @@ impl AuthProvider for LocalAuthProvider {
     fn login(&mut self, email: &str, password: &str) -> Result<Session, String> {
         let email = email.trim().to_lowercase();
 
-        // ── SELECT user row ───────────────────────────────────────────────────
-        // Returns Err(QueryReturnedNoRows) automatically if email not found.
-        let (user_id, stored_hash): (String, String) = self.conn
-            .query_row(
+        let (user_id, stored_hash): (String, String) = {
+            let conn = self.db.lock().unwrap();
+            conn.query_row(
                 "SELECT user_id, password_hash FROM users WHERE email = ?1",
                 params![email],
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| "No account found with that email.".to_string())?;
+            ).map_err(|_| "No account found with that email.".to_string())?
+        };
 
-        // ── Verify password ───────────────────────────────────────────────────
-        let parsed = PasswordHash::new(&stored_hash)
-            .map_err(|e| e.to_string())?;
-
+        let parsed = PasswordHash::new(&stored_hash).map_err(|e| e.to_string())?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .map_err(|_| "Incorrect password.".to_string())?;
+
+        // Ensure balance row exists (for users created before wallet system)
+        db::ensure_balance_row(&self.db, &user_id);
 
         Ok(Session {
             chain_file: Self::chain_file_for(&email),
@@ -169,7 +139,6 @@ impl AuthProvider for LocalAuthProvider {
 }
 
 // ─── Interactive terminal login flow ──────────────────────────────────────────
-// Nothing below here is storage-related. UI is fully separate from the database.
 
 fn prompt(label: &str) -> String {
     print!("  {}: ", label);
@@ -224,7 +193,6 @@ pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> S
                 print_auth_header(false);
                 let email    = prompt("Email");
                 let password = prompt_password("Password");
-
                 match auth.login(&email, &password) {
                     Ok(session) => {
                         execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
@@ -240,20 +208,17 @@ pub fn run_auth_flow(auth: &mut dyn AuthProvider, has_existing_users: bool) -> S
                     }
                 }
             }
-
             _ => {
                 print_auth_header(true);
                 let email    = prompt("Email");
                 let password = prompt_password("Password (min 8 chars)");
                 let confirm  = prompt_password("Confirm password");
-
                 if password != confirm {
                     execute!(io::stdout(), SetForegroundColor(Color::Red)).ok();
                     println!("\n  Passwords do not match.\n");
                     execute!(io::stdout(), ResetColor).ok();
                     continue;
                 }
-
                 match auth.register(&email, &password) {
                     Ok(session) => {
                         execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
