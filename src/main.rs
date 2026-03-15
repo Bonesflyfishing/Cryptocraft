@@ -1,11 +1,13 @@
 mod auth;
 mod blockchain;
+mod db;
 mod network;
 mod pool_client;
 mod pool_server;
 mod server;
+mod wallet;
 
-use auth::{LocalAuthProvider, run_auth_flow};
+use auth::run_auth_flow;
 use blockchain::*;
 use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor, Stylize}, terminal::{self, ClearType}};
 use rand::Rng;
@@ -60,8 +62,9 @@ fn pick_mode() -> u8 {
         println!("  [1] Solo Mine         (this machine only)");
         println!("  [2] Host Mining Pool  (this machine is the server)");
         println!("  [3] Join Mining Pool  (connect to pool server)");
+        println!("  [4] Wallet            (balance, send CC, history)");
         execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
-        println!("  [4] Exit");
+        println!("  [5] Exit");
         execute!(io::stdout(), ResetColor).ok();
         println!();
         print!("  Choice: ");
@@ -73,7 +76,8 @@ fn pick_mode() -> u8 {
             "2" => return 2,
             "3" => return 3,
             "4" => return 4,
-            _   => println!("  Please enter 1, 2, 3, or 4.\n"),
+            "5" => return 5,
+            _   => println!("  Please enter 1–5.\n"),
         }
     }
 }
@@ -84,15 +88,18 @@ fn main() {
     clear_screen();
     print_banner();
 
+    // Open shared SQLite database — used by auth, wallet, and pool server
+    let database = db::open();
+
     // Auth — only happens once at startup
-    let mut auth_provider  = LocalAuthProvider::load();
-    let has_users          = auth_provider.has_users();
-    let session            = run_auth_flow(&mut auth_provider, has_users);
+    let mut auth_provider = auth::LocalAuthProvider::new(database.clone());
+    let has_users         = auth_provider.has_users();
+    let session           = run_auth_flow(&mut auth_provider, has_users);
 
     let miner_name = session.email
         .split('@').next().unwrap_or("miner").to_string();
 
-    // ── Main menu loop — stays logged in until [4] Exit ───────────────────────
+    // ── Main menu loop ────────────────────────────────────────────────────────
     loop {
         clear_screen();
         print_banner();
@@ -159,7 +166,7 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(800));
                 clear_screen();
 
-                run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip, srv_state);
+                run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip, srv_state, database.clone());
             }
 
             // ── Pool server ───────────────────────────────────────────────────
@@ -195,7 +202,7 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(800));
                 clear_screen();
 
-                pool_server::run(blockchain, session.chain_file.clone(), bind_ip);
+                pool_server::run(blockchain, session.chain_file.clone(), bind_ip, database.clone());
             }
 
             // ── Pool client ───────────────────────────────────────────────────
@@ -204,11 +211,15 @@ fn main() {
                 let server_addr = network::pick_server_address(pool_server::POOL_PORT);
                 clear_screen();
                 pool_client::run(session.email.clone(), miner_name.clone(), server_addr);
-                // returns here when user presses Ctrl+C — loop continues to menu
+            }
+
+            // ── Wallet ────────────────────────────────────────────────────────
+            4 => {
+                wallet::run(&database, &session);
             }
 
             // ── Exit ─────────────────────────────────────────────────────────
-            4 | _ => {
+            5 | _ => {
                 clear_screen();
                 execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
                 println!("\n  Goodbye, {}!\n", miner_name);
@@ -234,6 +245,7 @@ fn run_solo_miner(
     email:          String,
     local_ip:       String,
     srv_state:      server::ServerState,
+    database:       db::Db,
 ) {
     let user_quit    = Arc::new(AtomicBool::new(false));
     let mine_stop    = Arc::new(AtomicBool::new(false));
@@ -319,6 +331,13 @@ fn run_solo_miner(
                 let block    = blockchain.add_block(nonce, hash, attempts);
                 blockchain.save(&chain_file);
                 blocks_found += 1;
+
+                // Credit reward to wallet
+                if let Some(uid) = db::user_id_for_email(&database, &email) {
+                    let memo = format!("Solo mining reward — block #{}", block.index);
+                    db::credit(&database, &uid, block.reward, &memo).ok();
+                }
+
                 print_found_block(&block);
                 clear_screen();
             }
