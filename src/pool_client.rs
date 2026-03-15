@@ -1,16 +1,14 @@
 // ─── pool_client.rs ───────────────────────────────────────────────────────────
-// Mining pool client. Connects to the server, receives block templates,
-// mines across all local CPU cores, submits valid hashes.
+// Mining pool client + HTTP dashboard server on port 2700.
 //
-// BUG FIX: mine() sets stop=true internally when it finds a hash (to signal
-// other threads to quit). The old code then checked `if !sm.load()` before
-// submitting — which was always false on success. Now we just check if result
-// is Some, which is correct regardless of the stop flag state.
+// HTTP port 2700 → dashboard_pool_client.html + /client_stats JSON
+// TCP            → connects to pool server for mining work
 // ─────────────────────────────────────────────────────────────────────────────
 
 use crate::pool_server::{ClientMsg, ServerMsg};
 use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}, terminal::{self, ClearType}};
 use rayon::prelude::*;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
@@ -22,8 +20,48 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tiny_http::{Header, Response, Server};
 
 const HASHRATE_REPORT_SECS: u64 = 5;
+const DASHBOARD_PORT: u16       = 2700;
+
+// ── Shared client stats (read by HTTP server, written by mining loop) ─────────
+
+#[derive(Serialize, Clone)]
+struct WinRecord {
+    block_index: u64,
+    hash:        String,
+    reward:      f64,
+    timestamp:   u64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ClientStats {
+    pub miner_name:   String,
+    pub hashrate:     u64,
+    pub blocks_won:   u64,
+    pub total_cc:     f64,
+    pub connected:    bool,
+    pub server_addr:  String,
+    pub current_block: u64,
+    pub difficulty:   usize,
+    pub status:       String,
+    pub peek_hash:    String,
+    pub wins_history: Vec<WinRecord>,
+}
+
+impl ClientStats {
+    fn new(miner_name: String, server_addr: String) -> Self {
+        ClientStats {
+            miner_name, server_addr,
+            hashrate: 0, blocks_won: 0, total_cc: 0.0,
+            connected: false, current_block: 0, difficulty: 0,
+            status: "Connecting...".into(),
+            peek_hash: "0".repeat(16),
+            wins_history: Vec::new(),
+        }
+    }
+}
 
 // ── Client entry point ────────────────────────────────────────────────────────
 
@@ -57,23 +95,58 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone stream")));
     let reader = BufReader::new(stream);
 
-    // Handshake
-    send_msg(&writer, &ClientMsg::Hello {
-        email: email.clone(),
-        name:  miner_name.clone(),
-    });
+    // Shared stats — written by mining loop, read by HTTP server
+    let shared_stats = Arc::new(Mutex::new(
+        ClientStats::new(miner_name.clone(), server_addr.clone())
+    ));
 
-    // ── Shared state ─────────────────────────────────────────────────────────
-    // stop_mining: set to true to kill current mining job (externally or on find)
-    // external_stop: set ONLY by server Stop messages — distinguishes
-    //   "server told us to stop" from "we found it ourselves"
+    // Send Hello
+    send_msg(&writer, &ClientMsg::Hello { email: email.clone(), name: miner_name.clone() });
+    if let Ok(mut st) = shared_stats.lock() { st.connected = true; st.status = "Waiting for work...".into(); }
+
+    // ── HTTP dashboard server ─────────────────────────────────────────────────
+    {
+        let ss   = shared_stats.clone();
+        let html = include_str!("../dashboard_pool_client.html").to_string();
+        std::thread::spawn(move || {
+            let addr   = format!("0.0.0.0:{}", DASHBOARD_PORT);
+            let server = match Server::http(&addr) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("[client dashboard] bind error: {}", e); return; }
+            };
+            let html_bytes = Arc::new(html.into_bytes());
+            for req in server.incoming_requests() {
+                let path = req.url().split('?').next().unwrap_or("/").to_string();
+                match path.as_str() {
+                    "/" | "/index.html" => {
+                        let body = html_bytes.as_ref().to_vec();
+                        let _ = req.respond(Response::from_data(body)
+                            .with_header(ct("text/html; charset=utf-8"))
+                            .with_header(no_cache()));
+                    }
+                    "/client_stats" => {
+                        let json = if let Ok(st) = ss.lock() {
+                            serde_json::to_string(&*st).unwrap_or_else(|_| "{}".into())
+                        } else { "{}".into() };
+                        let _ = req.respond(Response::from_data(json.into_bytes())
+                            .with_header(ct("application/json"))
+                            .with_header(cors())
+                            .with_header(no_cache()));
+                    }
+                    _ => { let _ = req.respond(Response::from_data(b"404".to_vec()).with_status_code(404)); }
+                }
+            }
+        });
+    }
+
+    // ── Atomic mining state ───────────────────────────────────────────────────
     let stop_mining   = Arc::new(AtomicBool::new(false));
     let external_stop = Arc::new(AtomicBool::new(false));
     let hash_counter  = Arc::new(AtomicU64::new(0));
     let peek_hash     = Arc::new(Mutex::new("0".repeat(16)));
     let user_quit     = Arc::new(AtomicBool::new(false));
 
-    // Spawn stdin reader — type Q + Enter to disconnect and return to menu
+    // Q + Enter to disconnect and return to menu
     {
         let uq = user_quit.clone();
         let sm = stop_mining.clone();
@@ -92,43 +165,55 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         });
     }
 
-    // ── UI state ──────────────────────────────────────────────────────────────
-    let ui_state = Arc::new(Mutex::new(ClientUi {
-        start:       Instant::now(),
-        status:      "Waiting for work from server...".into(),
-        blocks_won:  0,
-        total_cc:    0.0,
-        difficulty:  0,
-        block_index: 0,
-        hr_history:  VecDeque::with_capacity(12),
-        connected:   true,
-        server_addr: server_addr.clone(),
-    }));
-
-    // ── UI refresh thread ─────────────────────────────────────────────────────
+    // ── UI thread ─────────────────────────────────────────────────────────────
     {
-        let ui    = ui_state.clone();
-        let hc    = hash_counter.clone();
-        let ph    = peek_hash.clone();
-        let uq    = user_quit.clone();
-        let email2 = email.clone();
-        let name2  = miner_name.clone();
+        let ss  = shared_stats.clone();
+        let hc  = hash_counter.clone();
+        let ph  = peek_hash.clone();
+        let uq  = user_quit.clone();
+        let mut ui = ClientTermUi::new();
 
         std::thread::spawn(move || loop {
             if uq.load(Ordering::Relaxed) { break; }
             std::thread::sleep(Duration::from_millis(150));
             let hashes = hc.load(Ordering::Relaxed);
             let peek   = ph.lock().map(|p| p.clone()).unwrap_or_default();
-            if let Ok(mut st) = ui.lock() {
-                st.draw(hashes, &peek, &email2, &name2);
+
+            // Update hashrate in shared stats
+            if let Ok(mut st) = ss.lock() {
+                let rhr = ui.recent_hr(hashes);
+                st.hashrate  = rhr;
+                st.peek_hash = peek.clone();
+            }
+
+            if let Ok(st) = ss.lock() {
+                ui.draw(&st, hashes, &peek);
             }
         });
     }
 
     let mut current_handle: Option<std::thread::JoinHandle<()>> = None;
-    let mut last_report = Instant::now();
 
-    // ── Main server message loop ──────────────────────────────────────────────
+    // ── Dedicated hashrate reporter thread ────────────────────────────────────
+    // Runs independently every 5s so the server always sees live hashrate,
+    // even between blocks when the message loop is blocked waiting for work.
+    {
+        let hc = hash_counter.clone();
+        let w  = writer.clone();
+        let uq = user_quit.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(HASHRATE_REPORT_SECS));
+                if uq.load(Ordering::Relaxed) { break; }
+                let hr   = hc.load(Ordering::Relaxed);
+                let rate = (hr as f64 / HASHRATE_REPORT_SECS as f64) as u64;
+                send_msg(&w, &ClientMsg::Hashrate { hr: rate });
+                hc.store(0, Ordering::Relaxed);
+            }
+        });
+    }
+
+    // ── Main message loop ─────────────────────────────────────────────────────
     for line in reader.lines() {
         if user_quit.load(Ordering::Relaxed) { break; }
 
@@ -138,110 +223,87 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
         let msg: ServerMsg = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                if let Ok(mut st) = ui_state.lock() {
-                    st.status = format!("Bad message from server: {}", e);
-                }
+                if let Ok(mut st) = shared_stats.lock() { st.status = format!("Bad msg: {}", e); }
                 continue;
             }
         };
 
-        // Periodic hashrate report
-        if last_report.elapsed().as_secs() >= HASHRATE_REPORT_SECS {
-            let hr   = hash_counter.load(Ordering::Relaxed);
-            let secs = last_report.elapsed().as_secs_f64();
-            let rate = if secs > 0.0 { (hr as f64 / secs) as u64 } else { 0 };
-            send_msg(&writer, &ClientMsg::Hashrate { hr: rate });
-            hash_counter.store(0, Ordering::Relaxed);
-            last_report = Instant::now();
-        }
-
         match msg {
-            // ── New block to mine ─────────────────────────────────────────────
-            ServerMsg::Work { index, prev_hash, difficulty, timestamp, data, reward } => {
-                // Stop any current job cleanly
                 external_stop.store(false, Ordering::SeqCst);
                 stop_mining.store(true, Ordering::SeqCst);
-                if let Some(h) = current_handle.take() {
-                    let _ = h.join();
-                }
+                if let Some(h) = current_handle.take() { let _ = h.join(); }
                 stop_mining.store(false, Ordering::SeqCst);
 
-                if let Ok(mut st) = ui_state.lock() {
-                    st.status      = format!("Mining block #{} at difficulty {} ...", index, difficulty);
-                    st.difficulty  = difficulty;
-                    st.block_index = index;
+                if let Ok(mut st) = shared_stats.lock() {
+                    st.status        = format!("Mining block #{} at {} zeros", index, difficulty);
+                    st.difficulty    = difficulty;
+                    st.current_block = index;
                 }
 
-                // Spawn new mining job
                 let sm  = stop_mining.clone();
                 let ext = external_stop.clone();
                 let hc  = hash_counter.clone();
                 let ph  = peek_hash.clone();
                 let w2  = writer.clone();
-                let ui2 = ui_state.clone();
+                let ss2 = shared_stats.clone();
 
                 current_handle = Some(std::thread::spawn(move || {
-                    let result = mine(
-                        index, &prev_hash, difficulty,
-                        timestamp, &data, sm, hc, ph,
-                    );
-
-                    // ── FIX: check result directly, NOT the stop flag ─────────
-                    // mine() sets stop=true internally on success to halt other
-                    // threads, so checking !stop here would always be false.
-                    // We only skip submission if the SERVER told us to stop.
+                    let result = mine(index, &prev_hash, difficulty, timestamp, &data, sm, hc, ph);
                     if let Some((nonce, hash)) = result {
                         if !ext.load(Ordering::Relaxed) {
                             send_msg(&w2, &ClientMsg::Submit { index, nonce, hash });
-                            if let Ok(mut st) = ui2.lock() {
-                                st.status = format!(
-                                    "Submitted block #{} — waiting for confirmation...", index
-                                );
+                            if let Ok(mut st) = ss2.lock() {
+                                st.status = format!("Submitted block #{} — waiting for confirmation...", index);
                             }
                         }
                     }
                 }));
             }
 
-            // ── Server says stop (another miner found it) ─────────────────────
             ServerMsg::Stop => {
                 external_stop.store(true, Ordering::SeqCst);
                 stop_mining.store(true, Ordering::SeqCst);
-                if let Ok(mut st) = ui_state.lock() {
+                if let Ok(mut st) = shared_stats.lock() {
                     st.status = "Another miner found the block. Waiting for new work...".into();
                 }
             }
 
-            // ── Our submission accepted ───────────────────────────────────────
             ServerMsg::Accepted { block_index, reward } => {
-                if let Ok(mut st) = ui_state.lock() {
+                if let Ok(mut st) = shared_stats.lock() {
                     st.blocks_won += 1;
                     st.total_cc   += reward;
-                    st.status      = format!(
-                        "Block #{} ACCEPTED! Earned {:.4} CC", block_index, reward
-                    );
+                    st.status      = format!("Block #{} ACCEPTED! +{:.4} CC", block_index, reward);
+                    st.wins_history.push(WinRecord {
+                        block_index,
+                        hash:      st.peek_hash.clone(),
+                        reward,
+                        timestamp: crate::blockchain::now_secs(),
+                    });
+                    if st.wins_history.len() > 50 { st.wins_history.remove(0); }
                 }
             }
 
-            // ── Our submission rejected ───────────────────────────────────────
             ServerMsg::Rejected { reason } => {
-                if let Ok(mut st) = ui_state.lock() {
+                if let Ok(mut st) = shared_stats.lock() {
                     st.status = format!("Submission rejected: {}", reason);
                 }
             }
         }
     }
 
-    // ── Disconnected ─────────────────────────────────────────────────────────
+    // Disconnected
     stop_mining.store(true, Ordering::SeqCst);
     send_msg(&writer, &ClientMsg::Bye);
-    if let Ok(mut st) = ui_state.lock() { st.connected = false; }
+    if let Ok(mut st) = shared_stats.lock() {
+        st.connected = false;
+        st.status    = "Disconnected from pool.".into();
+    }
 
     clear();
     execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
     println!("\n  Disconnected from pool.");
     execute!(io::stdout(), ResetColor).ok();
-    if let Ok(st) = ui_state.lock() {
+    if let Ok(st) = shared_stats.lock() {
         println!("  Blocks Won : {}", st.blocks_won);
         println!("  CC Earned  : {:.4} CC", st.total_cc);
     }
@@ -251,21 +313,14 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
 // ── Mining core ───────────────────────────────────────────────────────────────
 
 fn mine(
-    index:      u64,
-    prev_hash:  &str,
-    difficulty: usize,
-    timestamp:  u64,
-    data:       &str,
-    stop:       Arc<AtomicBool>,
-    counter:    Arc<AtomicU64>,
-    peek:       Arc<Mutex<String>>,
+    index: u64, prev_hash: &str, difficulty: usize,
+    timestamp: u64, data: &str,
+    stop: Arc<AtomicBool>, counter: Arc<AtomicU64>, peek: Arc<Mutex<String>>,
 ) -> Option<(u64, String)> {
     let prefix    = "0".repeat(difficulty);
     let n_threads = num_cpus::get().max(1);
     let chunk     = u64::MAX / n_threads as u64;
     let result    = Arc::new(Mutex::new(None::<(u64, String)>));
-
-    // Start each thread at a random offset so pool members don't duplicate work
     let base: u64 = rand::random();
 
     (0..n_threads).into_par_iter().for_each(|t| {
@@ -281,27 +336,19 @@ fn mine(
         loop {
             if stop_r.load(Ordering::Relaxed) { return; }
             if result_r.lock().unwrap().is_some() { return; }
-
             let raw  = format!("{}{}{}{}{}{}", index, timestamp, data, prev_hash, nonce, difficulty);
-            let hash = {
-                let mut h = Sha256::new();
-                h.update(raw.as_bytes());
-                hex::encode(h.finalize())
-            };
-            local += 1;
-
+            let hash = { let mut h = Sha256::new(); h.update(raw.as_bytes()); hex::encode(h.finalize()) };
+            local   += 1;
             if local % 10_000 == 0 {
                 counter_r.fetch_add(10_000, Ordering::Relaxed);
                 if let Ok(mut p) = peek_r.try_lock() { *p = hash[..16].to_string(); }
                 local = 0;
             }
-
             if hash.starts_with(prefix_r.as_str()) {
                 *result_r.lock().unwrap() = Some((nonce, hash));
-                stop_r.store(true, Ordering::Relaxed); // signal other threads to stop
+                stop_r.store(true, Ordering::Relaxed);
                 return;
             }
-
             nonce = nonce.wrapping_add(1);
         }
     });
@@ -309,21 +356,16 @@ fn mine(
     Arc::try_unwrap(result).ok()?.into_inner().ok()?
 }
 
-// ── Client terminal UI ────────────────────────────────────────────────────────
+// ── Terminal UI ───────────────────────────────────────────────────────────────
 
-struct ClientUi {
-    start:       Instant,
-    status:      String,
-    blocks_won:  u64,
-    total_cc:    f64,
-    difficulty:  usize,
-    block_index: u64,
-    hr_history:  VecDeque<(Instant, u64)>,
-    connected:   bool,
-    server_addr: String,
+struct ClientTermUi {
+    start:      Instant,
+    hr_history: VecDeque<(Instant, u64)>,
 }
 
-impl ClientUi {
+impl ClientTermUi {
+    fn new() -> Self { ClientTermUi { start: Instant::now(), hr_history: VecDeque::with_capacity(12) } }
+
     fn recent_hr(&mut self, hashes: u64) -> u64 {
         let now = Instant::now();
         self.hr_history.push_back((now, hashes));
@@ -335,14 +377,12 @@ impl ClientUi {
         if dt > 0.0 { ((h1 - h0) as f64 / dt) as u64 } else { 0 }
     }
 
-    fn draw(&mut self, hashes: u64, peek: &str, email: &str, name: &str) {
+    fn draw(&self, st: &ClientStats, hashes: u64, peek: &str) {
         let mut out = io::stdout();
-        let rhr     = self.recent_hr(hashes);
         let up      = self.start.elapsed().as_secs();
-        let d       = self.difficulty;
+        let d       = st.difficulty;
 
         execute!(out, cursor::MoveTo(0, 0)).ok();
-
         execute!(out, SetForegroundColor(Color::Yellow)).ok();
         writeln!(out, "+------------------------------------------------------------------+").ok();
         writeln!(out, "|    CRYPTOCRAFT  Pool Client                                      |").ok();
@@ -350,64 +390,58 @@ impl ClientUi {
         execute!(out, ResetColor).ok();
 
         execute!(out, SetForegroundColor(Color::Cyan)).ok();
-        writeln!(out, "  Account : {:<28}  Uptime : {}", email, fmt_up(up)).ok();
-        writeln!(out, "  Miner   : {:<28}  Server : {}", name, self.server_addr).ok();
-        execute!(out, SetForegroundColor(
-            if self.connected { Color::Green } else { Color::Red }
-        )).ok();
-        writeln!(out, "  Pool    : {}",
-            if self.connected { "CONNECTED" } else { "DISCONNECTED" }).ok();
+        writeln!(out, "  Miner   : {:<28}  Uptime : {}", st.miner_name, fmt_up(up)).ok();
+        writeln!(out, "  Server  : {:<28}  Port   : {}", st.server_addr, DASHBOARD_PORT).ok();
+        execute!(out, SetForegroundColor(if st.connected { Color::Green } else { Color::Red })).ok();
+        writeln!(out, "  Pool    : {}  Dashboard: http://localhost:{}/",
+            if st.connected { "CONNECTED  " } else { "DISCONNECTED" }, DASHBOARD_PORT).ok();
         execute!(out, ResetColor).ok();
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::Green)).ok();
-        writeln!(out, "  Blocks Won    : {:<10}  CC Earned  : {:.4} CC",
-            self.blocks_won, self.total_cc).ok();
+        writeln!(out, "  Blocks Won    : {:<10}  CC Earned  : {:.4} CC", st.blocks_won, st.total_cc).ok();
         execute!(out, ResetColor).ok();
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::Magenta)).ok();
-        writeln!(out, "  Current Job   : Block #{:<10}  Difficulty : {} zeros",
-            self.block_index, d).ok();
+        writeln!(out, "  Current Job   : Block #{:<10}  Difficulty : {} zeros", st.current_block, d).ok();
         execute!(out, ResetColor).ok();
-
         execute!(out, SetForegroundColor(Color::Yellow)).ok();
-        writeln!(out, "  Hashrate      : {:<20}  Hashes : {}", fmt_hr(rhr), hashes).ok();
+        writeln!(out, "  Hashrate      : {:<20}  Hashes : {}", fmt_hr(st.hashrate), hashes).ok();
         execute!(out, ResetColor).ok();
 
         writeln!(out, "--------------------------------------------------------------------").ok();
-        let target = format!(
-            "{}{}",
-            "0".repeat(d.min(16)),
-            "x".repeat(16usize.saturating_sub(d))
-        );
+        let target = format!("{}{}", "0".repeat(d.min(16)), "x".repeat(16usize.saturating_sub(d)));
         execute!(out, SetForegroundColor(Color::Cyan)).ok();
         writeln!(out, "  Target        : {}...", target).ok();
-
         let hit = peek.len().min(d);
         write!(out, "  Current Peek  : ").ok();
         execute!(out, SetForegroundColor(Color::Green)).ok();
         write!(out, "{}", &peek[..hit.min(peek.len())]).ok();
         execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
-        writeln!(out, "{:<18}",
-            if hit < peek.len() { &peek[hit..] } else { "" }).ok();
+        writeln!(out, "{:<18}", if hit < peek.len() { &peek[hit..] } else { "" }).ok();
         execute!(out, ResetColor).ok();
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::White)).ok();
-        writeln!(out, "  Status        : {:<58}", &self.status).ok();
+        writeln!(out, "  Status        : {:<58}", &st.status).ok();
         execute!(out, ResetColor).ok();
 
         writeln!(out, "--------------------------------------------------------------------").ok();
         execute!(out, SetForegroundColor(Color::DarkGrey)).ok();
         writeln!(out, "  [Q + Enter] Back to menu                                         ").ok();
         execute!(out, ResetColor).ok();
-
         out.flush().ok();
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── HTTP header helpers ───────────────────────────────────────────────────────
+
+fn ct(s: &str) -> Header { Header::from_bytes("Content-Type", s).unwrap() }
+fn cors()      -> Header { Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap() }
+fn no_cache()  -> Header { Header::from_bytes("Cache-Control", "no-cache, no-store").unwrap() }
+
+// ── Misc helpers ─────────────────────────────────────────────────────────────
 
 fn send_msg(writer: &Arc<Mutex<TcpStream>>, msg: &ClientMsg) {
     if let Ok(mut w) = writer.lock() {
@@ -418,15 +452,13 @@ fn send_msg(writer: &Arc<Mutex<TcpStream>>, msg: &ClientMsg) {
 }
 
 fn fmt_hr(hr: u64) -> String {
-    if hr >= 1_000_000 { format!("{:.2} MH/s", hr as f64 / 1_000_000.0) }
-    else if hr >= 1_000 { format!("{:.2} KH/s", hr as f64 / 1_000.0) }
-    else                { format!("{} H/s", hr) }
+    if hr >= 1_000_000 { format!("{:.2} MH/s", hr as f64/1_000_000.0) }
+    else if hr >= 1_000 { format!("{:.2} KH/s", hr as f64/1_000.0) }
+    else { format!("{} H/s", hr) }
 }
 
 fn fmt_up(s: u64) -> String {
-    if s < 60      { format!("{}s", s) }
-    else if s < 3600 { format!("{}m {}s", s/60, s%60) }
-    else           { format!("{}h {}m", s/3600, (s%3600)/60) }
+    if s < 60 { format!("{}s", s) } else if s < 3600 { format!("{}m {}s", s/60, s%60) } else { format!("{}h {}m", s/3600, (s%3600)/60) }
 }
 
 fn clear() {
