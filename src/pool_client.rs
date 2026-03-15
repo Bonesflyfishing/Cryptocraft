@@ -146,48 +146,51 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     let peek_hash     = Arc::new(Mutex::new("0".repeat(16)));
     let user_quit     = Arc::new(AtomicBool::new(false));
 
-    // Q + Enter to disconnect and return to menu
-    {
-        let uq = user_quit.clone();
-        let sm = stop_mining.clone();
-        std::thread::spawn(move || {
-            let stdin  = io::stdin();
-            let locked = stdin.lock();
-            for line in locked.lines() {
-                if let Ok(l) = line {
-                    if l.trim().eq_ignore_ascii_case("q") {
-                        sm.store(true, Ordering::SeqCst);
-                        uq.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // ── UI thread ─────────────────────────────────────────────────────────────
+    // ── UI thread — also handles Q keypress ──────────────────────────────────
     {
         let ss  = shared_stats.clone();
         let hc  = hash_counter.clone();
         let ph  = peek_hash.clone();
         let uq  = user_quit.clone();
+        let sm  = stop_mining.clone();
         let mut ui = ClientTermUi::new();
 
-        std::thread::spawn(move || loop {
-            if uq.load(Ordering::Relaxed) { break; }
-            std::thread::sleep(Duration::from_millis(150));
-            let hashes = hc.load(Ordering::Relaxed);
-            let peek   = ph.lock().map(|p| p.clone()).unwrap_or_default();
+        std::thread::spawn(move || {
+            let _ = crossterm::terminal::enable_raw_mode();
+            loop {
+                if uq.load(Ordering::Relaxed) {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    break;
+                }
 
-            // Update hashrate in shared stats
-            if let Ok(mut st) = ss.lock() {
-                let rhr = ui.recent_hr(hashes);
-                st.hashrate  = rhr;
-                st.peek_hash = peek.clone();
-            }
+                // Poll for Q keypress
+                if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                    if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                        if key.kind == crossterm::event::KeyEventKind::Press
+                            && (key.code == crossterm::event::KeyCode::Char('q')
+                             || key.code == crossterm::event::KeyCode::Char('Q'))
+                        {
+                            let _ = crossterm::terminal::disable_raw_mode();
+                            sm.store(true, Ordering::SeqCst);
+                            uq.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                }
 
-            if let Ok(st) = ss.lock() {
-                ui.draw(&st, hashes, &peek);
+                std::thread::sleep(Duration::from_millis(150));
+                let hashes = hc.load(Ordering::Relaxed);
+                let peek   = ph.lock().map(|p| p.clone()).unwrap_or_default();
+
+                if let Ok(mut st) = ss.lock() {
+                    let rhr  = ui.recent_hr(hashes);
+                    st.hashrate  = rhr;
+                    st.peek_hash = peek.clone();
+                }
+
+                if let Ok(st) = ss.lock() {
+                    ui.draw(&st, hashes, &peek);
+                }
             }
         });
     }
