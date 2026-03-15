@@ -148,7 +148,7 @@ fn main() {
                     blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
                 );
 
-                let dashboard_html = include_str!("../dashboard.html")
+                let dashboard_html = include_str!("../dashboard_solo.html")
                     .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
                 let srv_state = server::ServerState::new(&session.chain_file);
                 server::spawn(srv_state.clone(), dashboard_html);
@@ -159,7 +159,7 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(800));
                 clear_screen();
 
-                run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip);
+                run_solo_miner(blockchain, session.chain_file.clone(), miner_name.clone(), session.email.clone(), ip, srv_state);
             }
 
             // ── Pool server ───────────────────────────────────────────────────
@@ -233,6 +233,7 @@ fn run_solo_miner(
     miner_name:     String,
     email:          String,
     local_ip:       String,
+    srv_state:      server::ServerState,
 ) {
     let user_quit    = Arc::new(AtomicBool::new(false));
     let mine_stop    = Arc::new(AtomicBool::new(false));
@@ -260,6 +261,7 @@ fn run_solo_miner(
     let mut blocks_found = 0u64;
     let mut flavor       = random_flavor();
     let mut flavor_t     = Instant::now();
+    let mut last_hr_push = Instant::now();
 
     'outer: while !user_quit.load(Ordering::Relaxed) {
         let template = Block {
@@ -292,6 +294,13 @@ fn run_solo_miner(
             let hashes = hash_counter.load(Ordering::Relaxed);
             let peek   = peek_hash.lock().map(|p| p.clone()).unwrap_or_default();
             ui.draw(&blockchain, hashes, &peek, flavor, blocks_found, &email, &local_ip);
+
+            // Push live hashrate to dashboard every 3 seconds
+            if last_hr_push.elapsed().as_secs() >= 3 {
+                let rhr = ui.recent_hashrate(hashes) as u64;
+                srv_state.set_hashrate(rhr);
+                last_hr_push = Instant::now();
+            }
 
             if user_quit.load(Ordering::Relaxed) {
                 mine_stop.store(true, Ordering::SeqCst);
