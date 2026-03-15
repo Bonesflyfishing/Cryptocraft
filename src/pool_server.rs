@@ -363,7 +363,7 @@ fn handle_client(stream: TcpStream, state: Arc<Mutex<PoolState>>) {
             }
 
             ClientMsg::Bye => break,
-        }
+            }
     }
 
     if let Ok(mut st) = state.lock() { st.miners.remove(&addr); }
