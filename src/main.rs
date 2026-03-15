@@ -148,7 +148,7 @@ fn main() {
                     blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
                 );
 
-                let dashboard_html = include_str!("../dashboard_solo.html")
+                let dashboard_html = include_str!("../dashboard.html")
                     .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
                 let srv_state = server::ServerState::new(&session.chain_file);
                 server::spawn(srv_state.clone(), dashboard_html);
