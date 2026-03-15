@@ -136,7 +136,7 @@ pub fn pick_host_interface() -> (String, String) {
 
 /// Try to find a CryptoCraft pool server on the local network via UDP broadcast.
 /// Sends CRYPTOCRAFT_DISCOVER_V1, waits up to `timeout_secs` for a reply.
-/// Returns the server address string e.g. "192.168.1.2:8080" if found.
+/// Returns the server address string e.g. "192.168.1.29:8080" if found.
 pub fn discover_pool(timeout_secs: u64) -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.set_broadcast(true).ok()?;
@@ -148,7 +148,7 @@ pub fn discover_pool(timeout_secs: u64) -> Option<String> {
     let mut buf = [0u8; 128];
     if let Ok((len, _src)) = sock.recv_from(&mut buf) {
         let reply = std::str::from_utf8(&buf[..len]).unwrap_or("");
-        // Expected format: "CRYPTOCRAFT_POOL_V1|192.168.1.2:8080"
+        // Expected format: "CRYPTOCRAFT_POOL_V1|192.168.1.29:8080"
         if let Some(addr) = reply.strip_prefix(&format!("{}|", DISCOVERY_PONG)) {
             return Some(addr.trim().to_string());
         }
@@ -209,14 +209,14 @@ pub fn pick_server_address(default_port: u16) -> String {
     // Fall back to manual entry
     println!();
     execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
-    print!("  Enter server IP (default 192.168.1.2): ");
+    print!("  Enter server IP (default 192.168.1.29): ");
     execute!(io::stdout(), ResetColor).ok();
     io::stdout().flush().ok();
 
     let mut buf = String::new();
     io::stdin().read_line(&mut buf).ok();
     let ip = buf.trim().to_string();
-    let ip = if ip.is_empty() { "192.168.1.2".to_string() } else { ip };
+    let ip = if ip.is_empty() { "192.168.1.29".to_string() } else { ip };
 
     format!("{}:{}", ip, default_port)
 }
