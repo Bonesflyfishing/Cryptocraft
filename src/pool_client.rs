@@ -107,7 +107,7 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     // ── HTTP dashboard server ─────────────────────────────────────────────────
     {
         let ss   = shared_stats.clone();
-        let html = include_str!("../dashboard_pool_client.html").to_string();
+        let html = include_str!("../dashboard.html").to_string();
         std::thread::spawn(move || {
             let addr   = format!("0.0.0.0:{}", DASHBOARD_PORT);
             let server = match Server::http(&addr) {
