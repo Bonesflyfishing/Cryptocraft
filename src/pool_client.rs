@@ -274,9 +274,10 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                     st.blocks_won += 1;
                     st.total_cc   += reward;
                     st.status      = format!("Block #{} ACCEPTED! +{:.4} CC", block_index, reward);
+                    let hash = st.peek_hash.clone();
                     st.wins_history.push(WinRecord {
                         block_index,
-                        hash:      st.peek_hash.clone(),
+                        hash,
                         reward,
                         timestamp: crate::blockchain::now_secs(),
                     });
