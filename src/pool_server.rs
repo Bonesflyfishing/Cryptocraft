@@ -166,23 +166,6 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String, db: Db) {
 
     let quit = Arc::new(AtomicBool::new(false));
 
-    // Q + Enter to return to menu
-    {
-        let q = quit.clone();
-        std::thread::spawn(move || {
-            let stdin  = std::io::stdin();
-            let locked = stdin.lock();
-            for line in locked.lines() {
-                if let Ok(l) = line {
-                    if l.trim().eq_ignore_ascii_case("q") {
-                        q.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
     let state = Arc::new(Mutex::new(PoolState {
         blockchain,
         save_file,
@@ -272,11 +255,30 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String, db: Db) {
     let listener = TcpListener::bind(&addr).expect("Failed to bind pool server");
     listener.set_nonblocking(true).expect("set_nonblocking");
 
+    // Enable raw mode so Q press is detected instantly without Enter
+    let _ = crossterm::terminal::enable_raw_mode();
+
     loop {
         if quit.load(Ordering::Relaxed) {
+            let _ = crossterm::terminal::disable_raw_mode();
             if let Ok(st) = state.lock() { st.blockchain.save(&st.save_file); }
             break;
         }
+
+        // Check for Q keypress
+        if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                if key.kind == crossterm::event::KeyEventKind::Press
+                    && (key.code == crossterm::event::KeyCode::Char('q')
+                     || key.code == crossterm::event::KeyCode::Char('Q'))
+                {
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    if let Ok(st) = state.lock() { st.blockchain.save(&st.save_file); }
+                    break;
+                }
+            }
+        }
+
         match listener.accept() {
             Ok((stream, _)) => {
                 let _ = stream.set_nonblocking(false);
