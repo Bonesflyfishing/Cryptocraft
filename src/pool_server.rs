@@ -12,7 +12,7 @@ use crossterm::{cursor, execute, style::{Color, ResetColor, SetForegroundColor}}
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -209,6 +209,75 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String, db: Db) {
                         let _ = req.respond(Response::from_data(body.as_bytes().to_vec())
                             .with_header(ct("application/json"))
                             .with_header(cors()));
+                    }
+
+                    "/balance" => {
+                        // ?email=user@example.com
+                        let url    = req.url().to_string();
+                        let email  = url.split("email=").nth(1)
+                            .map(|e| e.replace("%40", "@").replace("%2E", "."))
+                            .unwrap_or_default();
+                        let db_ref = if let Ok(st) = s.lock() { st.db.clone() } else {
+                            let _ = req.respond(Response::from_data(b"{}".to_vec())
+                                .with_header(ct("application/json")).with_header(cors()));
+                            continue;
+                        };
+                        let balance = crate::db::user_id_for_email(&db_ref, &email)
+                            .map(|uid| crate::db::get_balance(&db_ref, &uid))
+                            .unwrap_or(0.0);
+                        let body = format!(r#"{{"balance":{:.4},"email":"{}"}}"#, balance, email);
+                        let _ = req.respond(Response::from_data(body.into_bytes())
+                            .with_header(ct("application/json"))
+                            .with_header(cors())
+                            .with_header(no_cache()));
+                    }
+
+                    "/sync" => {
+                        // Accept offline solo mining rewards from a client
+                        // Body: { "email": "...", "blocks": [{ index, reward, timestamp, hash }] }
+                        let mut body_bytes = Vec::new();
+                        let _ = req.as_reader().read_to_end(&mut body_bytes);
+                        let response_json = if let Ok(text) = std::str::from_utf8(&body_bytes) {
+                            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
+                                let email  = payload["email"].as_str().unwrap_or("").to_string();
+                                let blocks = payload["blocks"].as_array();
+                                let db_ref = if let Ok(st) = s.lock() { st.db.clone() } else {
+                                    let err = r#"{"ok":false,"blocks_credited":0,"message":"server busy"}"#;
+                                    let _ = req.respond(Response::from_data(err.as_bytes().to_vec())
+                                        .with_header(ct("application/json")).with_header(cors()));
+                                    continue;
+                                };
+
+                                if let Some(uid) = crate::db::user_id_for_email(&db_ref, &email) {
+                                    let mut credited = 0u64;
+                                    if let Some(blocks) = blocks {
+                                        for block in blocks {
+                                            let index  = block["index"].as_u64().unwrap_or(0);
+                                            let reward = block["reward"].as_f64().unwrap_or(0.0);
+                                            if reward > 0.0 {
+                                                let memo = format!("Solo mining reward — block #{} (synced)", index);
+                                                if crate::db::credit(&db_ref, &uid, reward, &memo).is_ok() {
+                                                    credited += 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    format!(r#"{{"ok":true,"blocks_credited":{},"message":"synced {} blocks"}}"#,
+                                        credited, credited)
+                                } else {
+                                    r#"{"ok":false,"blocks_credited":0,"message":"email not found on server"}"#.into()
+                                }
+                            } else {
+                                r#"{"ok":false,"blocks_credited":0,"message":"invalid JSON"}"#.into()
+                            }
+                        } else {
+                            r#"{"ok":false,"blocks_credited":0,"message":"bad request"}"#.into()
+                        };
+
+                        let _ = req.respond(Response::from_data(response_json.into_bytes())
+                            .with_header(ct("application/json"))
+                            .with_header(cors())
+                            .with_header(no_cache()));
                     }
                     _ => { let _ = req.respond(Response::from_data(b"404".to_vec()).with_status_code(404)); }
                 }
