@@ -5,6 +5,7 @@
 
 use crate::db::{self, Db};
 use crate::auth::Session;
+use crate::sync;
 use crossterm::{execute, style::{Color, ResetColor, SetForegroundColor}};
 use std::io::{self, Write};
 use std::time::{UNIX_EPOCH, Duration, SystemTime};
@@ -13,7 +14,14 @@ use std::time::{UNIX_EPOCH, Duration, SystemTime};
 
 pub fn run(db: &Db, session: &Session) {
     loop {
-        let balance = db::get_balance(db, &session.user_id);
+        let online   = sync::server_reachable();
+        let balance  = if online {
+            // Use server's authoritative balance when connected
+            sync::fetch_server_balance(&session.email)
+                .unwrap_or_else(|| db::get_balance(db, &session.user_id))
+        } else {
+            db::get_balance(db, &session.user_id)
+        };
 
         clear();
         execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
@@ -26,10 +34,17 @@ pub fn run(db: &Db, session: &Session) {
         println!("  Account  : {}", session.email);
         execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
         println!("  Balance  : {:.4} CC", balance);
+        if online {
+            execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+            println!("  Server   : ONLINE");
+        } else {
+            execute!(io::stdout(), SetForegroundColor(Color::Red)).ok();
+            println!("  Server   : OFFLINE  (transfers unavailable)");
+        }
         execute!(io::stdout(), ResetColor).ok();
         println!();
         execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
-        println!("  [1] Send CC");
+        println!("  [1] Send CC{}", if !online { " (requires server)" } else { "" });
         println!("  [2] Transaction history");
         println!("  [3] Check another user's balance");
         execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
@@ -58,6 +73,28 @@ fn send_cc(db: &Db, session: &Session) {
     execute!(io::stdout(), SetForegroundColor(Color::Yellow)).ok();
     println!("  Send CryptoCraft Coins");
     println!("  ─────────────────────");
+    execute!(io::stdout(), ResetColor).ok();
+    println!();
+
+    // Require server connection for transfers — balances live on the server
+    execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+    print!("  Checking server connection...");
+    io::stdout().flush().ok();
+    execute!(io::stdout(), ResetColor).ok();
+
+    if !sync::server_reachable() {
+        println!();
+        execute!(io::stdout(), SetForegroundColor(Color::Red)).ok();
+        println!("  Cannot send CC — server is not reachable.");
+        println!("  Transfers require a connection to the pool server.");
+        println!("  Start the pool server on your network and try again.");
+        execute!(io::stdout(), ResetColor).ok();
+        pause();
+        return;
+    }
+
+    execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
+    println!(" connected!");
     execute!(io::stdout(), ResetColor).ok();
     println!();
 
