@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
-pub const BLOCK_REWARD: f64               = 12.0;
+pub const BLOCK_REWARD: f64               = 50.0;
 pub const HALVING_INTERVAL: u64           = 100;
-pub const TARGET_BLOCK_TIME_SECS: f64     = 120.0;  // target 2 minutes per block
+pub const TARGET_BLOCK_TIME_SECS: f64     = 480.0;  // target 8 minutes per block
 pub const DIFFICULTY_ADJUST_INTERVAL: u64 = 10;
-pub const MAX_DIFFICULTY: usize           = 16;
+pub const MAX_DIFFICULTY: usize           = 8;
 pub const MIN_DIFFICULTY: usize           = 1;
 
 pub fn now_secs() -> u64 {
@@ -117,19 +117,24 @@ impl Block {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Blockchain {
-    pub chain:       Vec<Block>,
-    pub difficulty:  usize,
-    pub total_mined: f64,
-    pub miner_name:  String,
+    pub chain:           Vec<Block>,
+    pub difficulty:      usize,
+    pub total_mined:     f64,
+    pub miner_name:      String,
+    /// Highest block index whose reward has been synced to the server.
+    /// 0 = nothing synced yet. Updated after a successful server sync.
+    #[serde(default)]
+    pub synced_through:  u64,
 }
 
 impl Blockchain {
     pub fn new(miner_name: &str) -> Self {
         Blockchain {
-            chain: vec![Block::genesis()],
-            difficulty: MIN_DIFFICULTY,
-            total_mined: 0.0,
-            miner_name: miner_name.to_string(),
+            chain:          vec![Block::genesis()],
+            difficulty:     MIN_DIFFICULTY,
+            total_mined:    0.0,
+            miner_name:     miner_name.to_string(),
+            synced_through: 0,
         }
     }
 
