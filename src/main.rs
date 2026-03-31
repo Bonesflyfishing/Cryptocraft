@@ -5,6 +5,7 @@ mod network;
 mod pool_client;
 mod pool_server;
 mod server;
+mod sync;
 mod wallet;
 
 use auth::run_auth_flow;
@@ -159,6 +160,19 @@ fn main() {
                     "  Chain: {} blocks  |  Difficulty: {}  |  Earned: {:.4} CC",
                     blockchain.chain.len(), blockchain.difficulty, blockchain.total_mined
                 );
+
+                // ── Silent server sync ────────────────────────────────────────
+                // Try to find and sync any offline-mined rewards to the server.
+                // Spawned in background so startup is never delayed.
+                {
+                    let email_c      = session.email.clone();
+                    let chain_file_c = session.chain_file.clone();
+                    let miner_name_c = miner_name.clone();
+                    std::thread::spawn(move || {
+                        let mut bc = Blockchain::load_or_new(&miner_name_c, &chain_file_c);
+                        sync::try_sync(&mut bc, &email_c, &chain_file_c);
+                    });
+                }
 
                 let dashboard_html = include_str!("../dashboard.html")
                     .replace("// __SERVER_MODE__", "window.__SERVER_MODE__ = true;");
@@ -337,6 +351,7 @@ fn run_solo_miner(
         match handle.join().ok().flatten() {
             Some((nonce, hash)) => {
                 let attempts = hash_counter.load(Ordering::Relaxed);
+                hash_counter.store(0, Ordering::Relaxed); // reset for next block
                 let block    = blockchain.add_block(nonce, hash, attempts);
                 blockchain.save(&chain_file);
                 blocks_found += 1;
