@@ -186,7 +186,7 @@ pub fn run(blockchain: Blockchain, save_file: String, bind_ip: String, db: Db) {
                 Err(e) => { eprintln!("[pool dashboard] bind error: {}", e); return; }
             };
             let html_bytes = Arc::new(html.into_bytes());
-            for req in server.incoming_requests() {
+            for mut req in server.incoming_requests() {
                 let path = req.url().split('?').next().unwrap_or("/").to_string();
                 match path.as_str() {
                     "/" | "/index.html" => {
