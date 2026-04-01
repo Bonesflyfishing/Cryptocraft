@@ -319,18 +319,27 @@ fn run_solo_miner(
                 last_hr_push = Instant::now();
             }
 
-            // Poll for Q keypress — non-blocking, 100ms timeout
+            // Poll for Q keypress or resize — non-blocking, 100ms timeout
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    if key.kind == KeyEventKind::Press {
-                        if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
-                            let _ = terminal::disable_raw_mode();
-                            user_quit.store(true, Ordering::SeqCst);
-                            mine_stop.store(true, Ordering::SeqCst);
-                            let _ = handle.join();
-                            break 'outer;
+                match event::read() {
+                    Ok(Event::Key(key)) => {
+                        if key.kind == KeyEventKind::Press {
+                            if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
+                                let _ = terminal::disable_raw_mode();
+                                user_quit.store(true, Ordering::SeqCst);
+                                mine_stop.store(true, Ordering::SeqCst);
+                                let _ = handle.join();
+                                break 'outer;
+                            }
                         }
                     }
+                    Ok(Event::Resize(_, _)) => {
+                        execute!(io::stdout(),
+                            terminal::Clear(ClearType::All),
+                            cursor::MoveTo(0, 0)
+                        ).ok();
+                    }
+                    _ => {}
                 }
             }
 
