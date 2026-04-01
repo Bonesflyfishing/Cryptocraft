@@ -22,7 +22,7 @@ use std::{
     path::Path,
 };
 
-const SERVER_CONFIG_FILE: &str = "cryptocraft_server.txt";
+pub const SERVER_CONFIG_FILE: &str = "cryptocraft_server.txt";
 const SYNC_TIMEOUT_SECS:  u64  = 4;
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -127,22 +127,45 @@ pub fn last_known_server() -> Option<String> {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Try to find the server: last known IP first, then UDP discovery.
+/// Try to find the server using multiple strategies in order:
+/// 1. Last known saved IP (instant, most reliable)
+/// 2. UDP broadcast discovery
+/// 3. Direct subnet scan of 192.168.x.1-254 on port 2700
 fn find_server_ip() -> Option<String> {
-    // Try last known server first (instant)
+    // Strategy 1: last known IP (saved from previous successful connection)
     if let Some(ip) = last_known_server() {
         if ping_server(&ip) {
             return Some(ip);
         }
     }
 
-    // Fall back to UDP broadcast discovery
-    if let Some(addr) = discover_pool(SYNC_TIMEOUT_SECS) {
-        // discover_pool returns "ip:port" — swap port to 2700 for HTTP dashboard
+    // Strategy 2: UDP broadcast (fast but unreliable on some routers)
+    if let Some(addr) = discover_pool(2) {
         let ip = addr.split(':').next()?.to_string();
         let dashboard_addr = format!("{}:2700", ip);
         if ping_server(&dashboard_addr) {
+            save_server_ip(&dashboard_addr);
             return Some(dashboard_addr);
+        }
+    }
+
+    // Strategy 3: Direct subnet scan — try common gateway subnets
+    // Uses very short timeout per host so scan finishes in a few seconds
+    let subnets = ["192.168.1", "192.168.0", "10.0.0", "10.0.1"];
+    for subnet in &subnets {
+        for host in 1u8..=254 {
+            let addr = format!("{}.{}:2700", subnet, host);
+            if let Ok(parsed) = addr.parse() {
+                if std::net::TcpStream::connect_timeout(
+                    &parsed,
+                    Duration::from_millis(80)
+                ).is_ok() {
+                    if ping_server(&addr) {
+                        save_server_ip(&addr);
+                        return Some(addr);
+                    }
+                }
+            }
         }
     }
 
@@ -185,6 +208,11 @@ fn post_sync(server_addr: &str, payload: &SyncRequest) -> Option<SyncResponse> {
 
 /// Simple blocking HTTP GET, returns body or None.
 fn http_get(url: &str, timeout_secs: u64) -> Option<String> {
+    http_get_timeout(url, timeout_secs)
+}
+
+/// HTTP GET with a specific timeout in seconds.
+fn http_get_timeout(url: &str, timeout_secs: u64) -> Option<String> {
     let without_scheme = url.strip_prefix("http://")?;
     let (host, path) = if let Some(pos) = without_scheme.find('/') {
         (&without_scheme[..pos], &without_scheme[pos..])
