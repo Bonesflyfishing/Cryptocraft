@@ -91,6 +91,9 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     };
 
     stream.set_nodelay(true).ok();
+    // Read timeout so the message loop wakes up every second to check user_quit
+    // instead of blocking forever waiting for the next server message.
+    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
 
     let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone stream")));
     let reader = BufReader::new(stream);
@@ -188,22 +191,31 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                     break;
                 }
 
-                // Poll for Q keypress
-                if crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                    if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
-                        if key.kind == crossterm::event::KeyEventKind::Press
-                            && (key.code == crossterm::event::KeyCode::Char('q')
-                             || key.code == crossterm::event::KeyCode::Char('Q'))
-                        {
-                            let _ = crossterm::terminal::disable_raw_mode();
-                            sm.store(true, Ordering::SeqCst);
-                            uq.store(true, Ordering::SeqCst);
-                            break;
+                // Poll for key/resize events — 150ms timeout so UI still refreshes
+                if crossterm::event::poll(Duration::from_millis(150)).unwrap_or(false) {
+                    match crossterm::event::read() {
+                        Ok(crossterm::event::Event::Key(key)) => {
+                            if key.kind == crossterm::event::KeyEventKind::Press
+                                && (key.code == crossterm::event::KeyCode::Char('q')
+                                 || key.code == crossterm::event::KeyCode::Char('Q'))
+                            {
+                                let _ = crossterm::terminal::disable_raw_mode();
+                                sm.store(true, Ordering::SeqCst);
+                                uq.store(true, Ordering::SeqCst);
+                                break;
+                            }
                         }
+                        Ok(crossterm::event::Event::Resize(_, _)) => {
+                            // Terminal resized — clear and force full redraw
+                            execute!(io::stdout(),
+                                crossterm::terminal::Clear(ClearType::All),
+                                cursor::MoveTo(0, 0)
+                            ).ok();
+                        }
+                        _ => {}
                     }
                 }
 
-                std::thread::sleep(Duration::from_millis(150));
                 let hashes = hc.load(Ordering::Relaxed);
                 let peek   = ph.lock().map(|p| p.clone()).unwrap_or_default();
 
@@ -242,10 +254,20 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
     }
 
     // ── Main message loop ─────────────────────────────────────────────────────
-    for line in reader.lines() {
+    // reader.lines() will return a TimedOut/WouldBlock error every second from
+    // our read_timeout — we treat those as wakeups to check user_quit, not exits.
+    'msg: loop {
         if user_quit.load(Ordering::Relaxed) { break; }
 
-        let line = match line { Ok(l) => l, Err(_) => break };
+        let line = match reader.lines().next() {
+            None                => break,              // server closed connection
+            Some(Err(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock
+                              || e.kind() == std::io::ErrorKind::TimedOut
+                              => continue,             // 1s timeout wakeup — check quit flag
+            Some(Err(_))      => break,                // real error
+            Some(Ok(l))       => l,
+        };
+
         if line.trim().is_empty() { continue; }
 
         let msg: ServerMsg = match serde_json::from_str(&line) {
@@ -255,6 +277,8 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                 continue;
             }
         };
+
+        if user_quit.load(Ordering::Relaxed) { break; }
 
         match msg {
             ServerMsg::Work { index, prev_hash, difficulty, timestamp, data, reward: _ } => {
@@ -319,7 +343,7 @@ pub fn run(email: String, miner_name: String, server_addr: String) {
                 }
             }
         }
-    }
+    } // end 'msg loop
 
     // Disconnected
     stop_mining.store(true, Ordering::SeqCst);
