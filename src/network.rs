@@ -136,7 +136,7 @@ pub fn pick_host_interface() -> (String, String) {
 
 /// Try to find a CryptoCraft pool server on the local network via UDP broadcast.
 /// Sends CRYPTOCRAFT_DISCOVER_V1, waits up to `timeout_secs` for a reply.
-/// Returns the server address string e.g. "192.168.1.29:8080" if found.
+/// Returns the server address string e.g. "192.168.1.2:8080" if found.
 pub fn discover_pool(timeout_secs: u64) -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.set_broadcast(true).ok()?;
@@ -148,7 +148,7 @@ pub fn discover_pool(timeout_secs: u64) -> Option<String> {
     let mut buf = [0u8; 128];
     if let Ok((len, _src)) = sock.recv_from(&mut buf) {
         let reply = std::str::from_utf8(&buf[..len]).unwrap_or("");
-        // Expected format: "CRYPTOCRAFT_POOL_V1|192.168.1.29:8080"
+        // Expected format: "CRYPTOCRAFT_POOL_V1|192.168.1.2:8080"
         if let Some(addr) = reply.strip_prefix(&format!("{}|", DISCOVERY_PONG)) {
             return Some(addr.trim().to_string());
         }
@@ -185,7 +185,19 @@ pub fn pick_server_address(default_port: u16) -> String {
     execute!(io::stdout(), ResetColor).ok();
     io::stdout().flush().ok();
 
-    if let Some(addr) = discover_pool(3) {
+    // Try UDP broadcast first (fast)
+    let found = if let Some(addr) = discover_pool(2) {
+        Some(addr)
+    } else {
+        // UDP failed — try subnet scan (slower but more reliable)
+        execute!(io::stdout(), SetForegroundColor(Color::DarkGrey)).ok();
+        println!("  UDP search failed, scanning subnet...");
+        execute!(io::stdout(), ResetColor).ok();
+        io::stdout().flush().ok();
+        scan_for_pool(default_port)
+    };
+
+    if let Some(addr) = found {
         execute!(io::stdout(), SetForegroundColor(Color::Green)).ok();
         println!("  Found pool server at: {}", addr);
         execute!(io::stdout(), ResetColor).ok();
@@ -198,6 +210,9 @@ pub fn pick_server_address(default_port: u16) -> String {
         let answer = buf.trim().to_lowercase();
 
         if answer.is_empty() || answer == "y" || answer == "yes" {
+            // Save for sync.rs to reuse
+            let _ = std::fs::write(crate::sync::SERVER_CONFIG_FILE,
+                format!("{}:{}", addr.split(':').next().unwrap_or(""), 2700));
             return addr;
         }
     } else {
@@ -209,19 +224,38 @@ pub fn pick_server_address(default_port: u16) -> String {
     // Fall back to manual entry
     println!();
     execute!(io::stdout(), SetForegroundColor(Color::Cyan)).ok();
-    print!("  Enter server IP (default 192.168.1.29): ");
+    print!("  Enter server IP (default 192.168.1.2): ");
     execute!(io::stdout(), ResetColor).ok();
     io::stdout().flush().ok();
 
     let mut buf = String::new();
     io::stdin().read_line(&mut buf).ok();
     let ip = buf.trim().to_string();
-    let ip = if ip.is_empty() { "192.168.1.29".to_string() } else { ip };
+    let ip = if ip.is_empty() { "192.168.1.2".to_string() } else { ip };
 
     format!("{}:{}", ip, default_port)
 }
 
-fn prompt_manual_ip(label: &str) -> (String, String) {
+/// Scan local subnets for a CryptoCraft pool server by trying port directly.
+/// Much more reliable than UDP broadcast on consumer routers.
+pub fn scan_for_pool(pool_port: u16) -> Option<String> {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let subnets = ["192.168.1", "192.168.0", "10.0.0", "10.0.1"];
+
+    for subnet in &subnets {
+        for host in 1u8..=254 {
+            let addr = format!("{}.{}:{}", subnet, host, pool_port);
+            if let Ok(parsed) = addr.parse() {
+                if TcpStream::connect_timeout(&parsed, Duration::from_millis(80)).is_ok() {
+                    return Some(addr);
+                }
+            }
+        }
+    }
+    None
+}
     print!("  {}: ", label);
     io::stdout().flush().ok();
     let mut buf = String::new();
