@@ -141,7 +141,7 @@ fn find_server_ip() -> Option<String> {
 
     // Strategy 2: UDP broadcast (fast but unreliable on some routers)
     if let Some(addr) = discover_pool(2) {
-        let ip = addr.split(':').next()?.to_string();
+        let ip: String = addr.split(':').next()?.to_string();
         let dashboard_addr = format!("{}:2700", ip);
         if ping_server(&dashboard_addr) {
             save_server_ip(&dashboard_addr);
