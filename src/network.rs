@@ -263,4 +263,3 @@ pub fn scan_for_pool(pool_port: u16) -> Option<String> {
     let ip = buf.trim().to_string();
     let ip = if ip.is_empty() { "0.0.0.0".to_string() } else { ip };
     (ip.clone(), ip)
-}
