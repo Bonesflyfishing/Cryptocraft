@@ -257,7 +257,7 @@ pub fn scan_for_pool(pool_port: u16) -> Option<String> {
     None
 }
     print!("  {}: ", label);
-    io::stdout().flush().ok();
+    io::stdout::().flush().ok();
     let mut buf = String::new();
     io::stdin().read_line(&mut buf).ok();
     let ip = buf.trim().to_string();
